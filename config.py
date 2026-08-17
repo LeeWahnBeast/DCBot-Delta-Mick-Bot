@@ -87,6 +87,10 @@ AI_AUTO_CHAT_INTERVAL_SEC = int(os.environ.get("AI_AUTO_CHAT_INTERVAL_SEC", str(
 # Chỉ tự nhắn nếu có người thật (không phải bot) chat trong kênh trong khoảng thời gian này
 AI_AUTO_CHAT_REQUIRE_ACTIVITY_SEC = int(os.environ.get("AI_AUTO_CHAT_REQUIRE_ACTIVITY_SEC", str(60 * 60)))
 AI_LEARN_MIN_WORD_LEN = int(os.environ.get("AI_LEARN_MIN_WORD_LEN", "3"))
+# Khung giờ "ngủ" - bot KHÔNG tự nhắn trong khung này (giờ VN, 0-23). Mặc định
+# 0h -> 3h sáng, tránh spam lúc đêm khuya không ai đọc.
+AI_AUTO_CHAT_QUIET_START_HOUR = int(os.environ.get("AI_AUTO_CHAT_QUIET_START_HOUR", "0"))
+AI_AUTO_CHAT_QUIET_END_HOUR = int(os.environ.get("AI_AUTO_CHAT_QUIET_END_HOUR", "3"))
 
 # --- ATM: giữ tiền hộ, tách khỏi ví tiêu xài ---
 ATM_ENABLED = True

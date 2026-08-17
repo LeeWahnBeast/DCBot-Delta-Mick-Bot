@@ -12,7 +12,7 @@ free là ephemeral, dễ mất dữ liệu khi redeploy).
 import asyncio
 import random
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import discord
 from discord.ext import tasks
@@ -36,6 +36,9 @@ from config import (
     AI_CHAT_CHANNEL_ID,
     AI_AUTO_CHAT_INTERVAL_SEC,
     AI_AUTO_CHAT_REQUIRE_ACTIVITY_SEC,
+    AI_AUTO_CHAT_QUIET_START_HOUR,
+    AI_AUTO_CHAT_QUIET_END_HOUR,
+    VN_UTC_OFFSET_HOURS,
     BUSINESS_TICK_SEC,
     MICKCOIN_EMOJI,
     log,
@@ -43,11 +46,7 @@ from config import (
 from tiktok_client import TikTokClient
 import db
 import economy
-import daily
-import games
-import achievements
-import quests
-import business
+import features
 import ai_chat
 import level_card
 
@@ -72,7 +71,7 @@ async def on_ready():
     global _synced
     log.info("Đã đăng nhập với tài khoản %s (id=%s)", client.user, client.user.id)
 
-    client.add_view(daily.DailyClaimView())  # persistent view, sống sót qua restart
+    client.add_view(features.DailyClaimView())  # persistent view, sống sót qua restart
 
     if not _synced:
         await tree.sync()
@@ -295,7 +294,7 @@ async def before_sync_identity_loop():
 
 @tasks.loop(seconds=60)
 async def daily_loop():
-    await daily.maybe_post_daily(client, DAILY_CHANNEL_ID)
+    await features.maybe_post_daily(client, DAILY_CHANNEL_ID)
 
 
 @daily_loop.before_loop
@@ -312,7 +311,7 @@ async def before_daily_loop():
 @tasks.loop(seconds=BUSINESS_TICK_SEC)
 async def business_tick_loop():
     try:
-        await business.run_income_tick()
+        await features.run_income_tick()
     except Exception as e:
         log.warning("Business tick lỗi: %s", e)
 
@@ -327,8 +326,22 @@ async def before_business_tick_loop():
 # ---------------------------------------------------------------------------
 
 
+def _in_ai_quiet_hours() -> bool:
+    """True nếu đang trong khung giờ 'ngủ' (giờ VN) - bot không tự nhắn."""
+    vn_hour = datetime.now(timezone(timedelta(hours=VN_UTC_OFFSET_HOURS))).hour
+    start, end = AI_AUTO_CHAT_QUIET_START_HOUR, AI_AUTO_CHAT_QUIET_END_HOUR
+    if start == end:
+        return False
+    if start < end:
+        return start <= vn_hour < end
+    return vn_hour >= start or vn_hour < end  # khung vắt qua nửa đêm, vd 22h -> 3h
+
+
 @tasks.loop(seconds=AI_AUTO_CHAT_INTERVAL_SEC)
 async def ai_auto_chat_loop():
+    if _in_ai_quiet_hours():
+        return  # đang trong khung giờ ngủ (mặc định 0h-3h sáng) -> không tự nhắn
+
     channel = await _get_channel(AI_CHAT_CHANNEL_ID)
     if channel is None:
         return
@@ -424,9 +437,9 @@ async def _announce_level_up(member: discord.Member, result: dict):
         pass
 
     try:
-        unlocked = await achievements.check_and_unlock_by_stats(member.id)
+        unlocked = await features.check_and_unlock_by_stats(member.id)
         if unlocked:
-            await achievements.announce_unlocks(channel, member, unlocked)
+            await features.announce_unlocks(channel, member, unlocked)
     except Exception as e:
         log.warning("Kiểm tra thành tựu sau voice XP lỗi: %s", e)
 
@@ -454,17 +467,17 @@ async def on_message(message: discord.Message):
     content = message.content.strip()
     lowered = content.lower()
 
-    if games.has_active_wordle(message.author.id) and games.is_valid_guess(content):
-        embed, _finished = await games.process_guess(message.author.id, content)
+    if features.has_active_wordle(message.author.id) and features.is_valid_guess(content):
+        embed, _finished = await features.process_guess(message.author.id, content)
         try:
             await message.reply(embed=embed, mention_author=False)
         except Exception as e:
             log.warning("Gửi kết quả Wordle lỗi: %s", e)
         await _bump_quest_and_notify(message, "play_game_5")
         try:
-            unlocked = await achievements.check_and_unlock_by_stats(message.author.id)
+            unlocked = await features.check_and_unlock_by_stats(message.author.id)
             if unlocked:
-                await achievements.announce_unlocks(message.channel, message.author, unlocked)
+                await features.announce_unlocks(message.channel, message.author, unlocked)
         except Exception as e:
             log.warning("Kiểm tra thành tựu sau wordle lỗi: %s", e)
         return  # không cộng XP cho tin nhắn dùng để đoán Wordle
@@ -492,16 +505,16 @@ async def on_message(message: discord.Message):
 
 async def _check_first_message_achievement(message: discord.Message):
     try:
-        unlocked = await achievements.unlock(message.author.id, "first_message")
+        unlocked = await features.unlock(message.author.id, "first_message")
         if unlocked:
-            await achievements.announce_unlocks(message.channel, message.author, [unlocked])
+            await features.announce_unlocks(message.channel, message.author, [unlocked])
     except Exception as e:
         log.warning("Kiểm tra thành tựu first_message lỗi: %s", e)
 
 
 async def _bump_quest_and_notify(message: discord.Message, quest_id: str):
     try:
-        finished = await quests.bump_progress(message.author.id, quest_id)
+        finished = await features.bump_progress(message.author.id, quest_id)
     except Exception as e:
         log.warning("Cập nhật quest lỗi: %s", e)
         return
@@ -558,9 +571,9 @@ async def _apply_xp_gain(message: discord.Message):
         await _bump_quest_and_notify(message, "level_up")
 
         try:
-            unlocked = await achievements.check_and_unlock_by_stats(message.author.id)
+            unlocked = await features.check_and_unlock_by_stats(message.author.id)
             if unlocked:
-                await achievements.announce_unlocks(message.channel, message.author, unlocked)
+                await features.announce_unlocks(message.channel, message.author, unlocked)
         except Exception as e:
             log.warning("Kiểm tra thành tựu lỗi: %s", e)
 
@@ -568,57 +581,14 @@ async def _apply_xp_gain(message: discord.Message):
 # ---------------------------------------------------------------------------
 # Slash commands
 # ---------------------------------------------------------------------------
-
-
-@tree.command(name="profile", description="Xem MICK, level và XP của bạn")
-async def profile_cmd(interaction: discord.Interaction):
-    data = await economy.get_profile(interaction.user.id)
-    embed = discord.Embed(title=f"📊 Hồ sơ của {interaction.user.display_name}", color=discord.Color.blurple())
-    embed.add_field(name="MICK", value=f"{data['mick']} 🪙", inline=True)
-    embed.add_field(name="Level", value=str(data["level"]), inline=True)
-    embed.add_field(name="XP", value=f"{data['xp']}/{data['xp_needed']}", inline=True)
-    embed.set_thumbnail(url=interaction.user.display_avatar.url)
-    await interaction.response.send_message(embed=embed)
-
-
-@tree.command(name="cup", description="Chơi úp ly chọn kẹo, đoán đúng nhận MICK")
-async def cup_cmd(interaction: discord.Interaction):
-    view = games.CupGameView(owner_id=interaction.user.id)
-    await interaction.response.send_message(embed=games.build_cup_game_embed(), view=view)
-
-
-@tree.command(name="wordle", description="Chơi Wordle, đoán đúng từ 5 chữ trong 6 lượt để nhận MICK")
-async def wordle_cmd(interaction: discord.Interaction):
-    if games.has_active_wordle(interaction.user.id):
-        await interaction.response.send_message(
-            "Bạn đang có ván Wordle chưa xong! Gõ 1 từ 5 chữ vào kênh để đoán tiếp.", ephemeral=True
-        )
-        return
-    embed = games.start_wordle(interaction.user.id)
-    await interaction.response.send_message(embed=embed)
-
-
-@tree.command(name="level", description="Xem card level (ảnh) của bạn hoặc người khác")
-@discord.app_commands.describe(thanh_vien="Xem level của người khác (bỏ trống để xem của bạn)")
-async def level_cmd(interaction: discord.Interaction, thanh_vien: discord.Member = None):
-    await interaction.response.defer()
-    target = thanh_vien or interaction.user
-    profile = await economy.get_profile(target.id)
-
-    buf = await level_card.render_level_card(
-        display_name=target.display_name,
-        avatar_url=target.display_avatar.replace(size=256).url,
-        level=profile["level"],
-        xp=profile["xp"],
-        xp_needed=profile["xp_needed"],
-    )
-    file = discord.File(buf, filename="level.png")
-    await interaction.followup.send(file=file)
-
-
-# ---------------------------------------------------------------------------
-# Slash commands: Rank (xem level/xp/hạng của bản thân)
-# ---------------------------------------------------------------------------
+#
+# Các lệnh cùng chủ đề đã được gộp lại thành 1 lệnh duy nhất, có nút bấm để
+# chuyển qua lại giữa các "view" (tương đương các lệnh cũ):
+#   /profile   = /profile (cũ) + /level (cũ) + /rank (cũ)
+#   /game      = /cup (cũ) + /wordle (cũ)
+#   /business  = /business (cũ) + /open_business (cũ) + /hire (cũ)
+#   /tudien    = /day_tu (cũ) + /tra_tu (cũ)
+#   /help      = lệnh mới, liệt kê toàn bộ lệnh theo nhóm (nút bấm)
 
 
 def _progress_bar(current: int, needed: int, length: int = 12) -> str:
@@ -627,29 +597,124 @@ def _progress_bar(current: int, needed: int, length: int = 12) -> str:
     return "█" * filled + "░" * (length - filled)
 
 
-@tree.command(name="rank", description="Xem level, XP và hạng của bạn (hoặc người khác)")
-@discord.app_commands.describe(thanh_vien="Xem rank của người khác (bỏ trống để xem của bạn)")
-async def rank_cmd(interaction: discord.Interaction, thanh_vien: discord.Member = None):
-    await interaction.response.defer()
-    target = thanh_vien or interaction.user
-
+async def _build_rank_embed(target: discord.Member) -> discord.Embed:
     profile = await economy.get_profile(target.id)
     users = await db.get_all_users()
     users.sort(key=lambda u: (u[1].get("level", 0), u[1].get("xp", 0)), reverse=True)
     position = next((i for i, (uid, _) in enumerate(users, start=1) if uid == str(target.id)), len(users) + 1)
 
     bar = _progress_bar(profile["xp"], profile["xp_needed"])
-    embed = discord.Embed(title=f"📊 Rank của {target.display_name}", color=discord.Color.blurple())
+    embed = discord.Embed(title=f"🏅 Rank của {target.display_name}", color=discord.Color.blurple())
     embed.add_field(name="Hạng", value=f"#{position}/{len(users)}", inline=True)
     embed.add_field(name="Level", value=str(profile["level"]), inline=True)
     embed.add_field(name="MICK", value=f"{MICKCOIN_EMOJI} {profile['mick']}", inline=True)
-    embed.add_field(
-        name="XP",
-        value=f"{bar}\n{profile['xp']}/{profile['xp_needed']}",
-        inline=False,
-    )
+    embed.add_field(name="XP", value=f"{bar}\n{profile['xp']}/{profile['xp_needed']}", inline=False)
     embed.set_thumbnail(url=target.display_avatar.url)
-    await interaction.followup.send(embed=embed)
+    return embed
+
+
+async def _build_profile_embed(target: discord.Member) -> discord.Embed:
+    data = await economy.get_profile(target.id)
+    embed = discord.Embed(title=f"📊 Hồ sơ của {target.display_name}", color=discord.Color.blurple())
+    embed.add_field(name="MICK", value=f"{data['mick']} 🪙", inline=True)
+    embed.add_field(name="Level", value=str(data["level"]), inline=True)
+    embed.add_field(name="XP", value=f"{data['xp']}/{data['xp_needed']}", inline=True)
+    embed.set_thumbnail(url=target.display_avatar.url)
+    return embed
+
+
+class ProfileView(discord.ui.View):
+    """Gộp /profile + /level + /rank cũ: 3 nút chuyển view trên cùng 1 message."""
+
+    def __init__(self, target: discord.Member, owner_id: int):
+        super().__init__(timeout=90)
+        self.target = target
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Dùng `/profile` để xem của riêng bạn nhé!", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Hồ sơ", emoji="📊", style=discord.ButtonStyle.primary)
+    async def btn_profile(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await _build_profile_embed(self.target)
+        await interaction.edit_original_response(embed=embed, attachments=[], view=self)
+
+    @discord.ui.button(label="Level Card", emoji="🖼️", style=discord.ButtonStyle.secondary)
+    async def btn_level(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        profile = await economy.get_profile(self.target.id)
+        buf = await level_card.render_level_card(
+            display_name=self.target.display_name,
+            avatar_url=self.target.display_avatar.replace(size=256).url,
+            level=profile["level"],
+            xp=profile["xp"],
+            xp_needed=profile["xp_needed"],
+        )
+        file = discord.File(buf, filename="level.png")
+        embed = discord.Embed(title=f"🖼️ Level card của {self.target.display_name}", color=discord.Color.blurple())
+        embed.set_image(url="attachment://level.png")
+        await interaction.edit_original_response(embed=embed, attachments=[file], view=self)
+
+    @discord.ui.button(label="Rank", emoji="🏅", style=discord.ButtonStyle.secondary)
+    async def btn_rank(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        embed = await _build_rank_embed(self.target)
+        await interaction.edit_original_response(embed=embed, attachments=[], view=self)
+
+
+@tree.command(name="profile", description="Xem hồ sơ, level card và rank của bạn (hoặc người khác)")
+@discord.app_commands.describe(thanh_vien="Xem của người khác (bỏ trống để xem của bạn)")
+async def profile_cmd(interaction: discord.Interaction, thanh_vien: discord.Member = None):
+    target = thanh_vien or interaction.user
+    embed = await _build_profile_embed(target)
+    view = ProfileView(target=target, owner_id=interaction.user.id)
+    await interaction.response.send_message(embed=embed, view=view)
+
+
+# ---------------------------------------------------------------------------
+# Slash command: Minigame (gộp /cup + /wordle cũ, chọn qua nút bấm)
+# ---------------------------------------------------------------------------
+
+
+class GameChooserView(discord.ui.View):
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=30)
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Dùng `/game` để chơi phần của riêng bạn!", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Úp ly chọn kẹo", emoji="🥤", style=discord.ButtonStyle.primary)
+    async def btn_cup(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = features.CupGameView(owner_id=self.owner_id)
+        await interaction.response.edit_message(embed=features.build_cup_game_embed(), view=view)
+
+    @discord.ui.button(label="Wordle", emoji="🟩", style=discord.ButtonStyle.success)
+    async def btn_wordle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if features.has_active_wordle(self.owner_id):
+            await interaction.response.send_message(
+                "Bạn đang có ván Wordle chưa xong! Gõ 1 từ 5 chữ vào kênh để đoán tiếp.", ephemeral=True
+            )
+            return
+        embed = features.start_wordle(self.owner_id)
+        await interaction.response.edit_message(embed=embed, view=None)
+
+
+@tree.command(name="game", description="Chơi minigame: Úp ly chọn kẹo hoặc Wordle")
+async def game_cmd(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="🎮 Chọn minigame",
+        description="Bấm nút bên dưới để chơi:",
+        color=discord.Color.gold(),
+    )
+    await interaction.response.send_message(embed=embed, view=GameChooserView(interaction.user.id))
 
 
 # ---------------------------------------------------------------------------
@@ -690,31 +755,26 @@ async def leaderboard_cmd(interaction: discord.Interaction, loai: discord.app_co
 
 
 # ---------------------------------------------------------------------------
-# Slash commands: Thành tựu
+# Slash commands: Thành tựu + Quest
 # ---------------------------------------------------------------------------
 
 
 @tree.command(name="achievements", description="Xem danh sách thành tựu")
 async def achievements_cmd(interaction: discord.Interaction):
     user = await db.get_user(interaction.user.id)
-    embed = achievements.build_list_embed(user.get("achievements", []))
+    embed = features.build_list_embed(user.get("achievements", []))
     await interaction.response.send_message(embed=embed)
-
-
-# ---------------------------------------------------------------------------
-# Slash commands: Quest
-# ---------------------------------------------------------------------------
 
 
 @tree.command(name="quest", description="Xem quest hằng ngày của bạn")
 async def quest_cmd(interaction: discord.Interaction):
-    user = await quests.get_today_quests(interaction.user.id)
-    embed = quests.build_quest_embed(user, interaction.user.display_name)
+    user = await features.get_today_quests(interaction.user.id)
+    embed = features.build_quest_embed(user, interaction.user.display_name)
     await interaction.response.send_message(embed=embed)
 
 
 # ---------------------------------------------------------------------------
-# Slash commands: Chuyển MICK (delay theo số tiền)
+# Slash commands: Chuyển MICK (delay theo số tiền) + ATM
 # ---------------------------------------------------------------------------
 
 
@@ -750,11 +810,6 @@ async def transfer_cmd(interaction: discord.Interaction, nguoi_nhan: discord.Mem
         )
     else:
         await interaction.followup.send(f"❌ Chuyển tiền thất bại ({result['reason']}). MICK chưa bị trừ.")
-
-
-# ---------------------------------------------------------------------------
-# Slash commands: ATM (giữ MICK hộ, tách khỏi ví tiêu xài)
-# ---------------------------------------------------------------------------
 
 
 @tree.command(name="atm", description="Gửi/rút MICK vào ATM (giữ tiền hộ, tách khỏi ví tiêu xài)")
@@ -794,112 +849,177 @@ async def atm_cmd(interaction: discord.Interaction, hanh_dong: discord.app_comma
 
 
 # ---------------------------------------------------------------------------
-# Slash commands: Kinh doanh (quán/công ty/nhà trọ/khách sạn)
+# Slash command: Kinh doanh (gộp /business + /open_business + /hire cũ)
 # ---------------------------------------------------------------------------
 
-_BIZ_CHOICES = [
-    discord.app_commands.Choice(name="🍜 Quán ăn", value="quan"),
-    discord.app_commands.Choice(name="🏢 Công ty", value="congty"),
-    discord.app_commands.Choice(name="🏠 Nhà trọ", value="nhatro"),
-    discord.app_commands.Choice(name="🏨 Khách sạn", value="khachsan"),
-]
+
+class BusinessKindSelect(discord.ui.Select):
+    def __init__(self, action: str, owner_id: int):
+        self.action = action  # "open" hoặc "hire"
+        self.owner_id = owner_id
+        options = [
+            discord.SelectOption(label=name, value=kind) for kind, name in features.BUSINESS_NAMES.items()
+        ]
+        placeholder = "Chọn loại hình muốn mở..." if action == "open" else "Chọn loại hình muốn thuê nhân viên..."
+        super().__init__(placeholder=placeholder, options=options, min_values=1, max_values=1)
+
+    async def callback(self, interaction: discord.Interaction):
+        kind = self.values[0]
+        label = features.BUSINESS_NAMES[kind]
+
+        if self.action == "open":
+            result = await features.open_business(self.owner_id, kind)
+            if result["ok"]:
+                text = f"🎉 Đã mở **{label}**! Tốn **{result['cost']} MICK**. Bấm nút \"Thuê nhân viên\" ở `/business` để thuê người."
+                try:
+                    first = await features.unlock(self.owner_id, "first_business")
+                    stats_based = await features.check_and_unlock_by_stats(self.owner_id)
+                    all_unlocked = ([first] if first else []) + stats_based
+                    if all_unlocked:
+                        await features.announce_unlocks(interaction.channel, interaction.user, all_unlocked)
+                except Exception as e:
+                    log.warning("Kiểm tra thành tựu sau mở business lỗi: %s", e)
+            else:
+                reason = result["reason"]
+                if reason == "already_open":
+                    text = f"❌ Bạn đã mở **{label}** rồi!"
+                elif reason == "insufficient_funds":
+                    text = f"❌ Không đủ MICK! Cần **{result['cost']} MICK** để mở **{label}**."
+                else:
+                    text = "❌ Có lỗi xảy ra, thử lại sau."
+        else:
+            result = await features.hire_staff(self.owner_id, kind)
+            if result["ok"]:
+                text = (
+                    f"👥 Đã thuê thêm nhân viên cho **{label}**! Hiện có **{result['staff']}** nhân viên. "
+                    f"Tốn **{result['cost']} MICK**. Nhân viên vẫn làm việc kể cả khi bạn offline!"
+                )
+            else:
+                reason = result["reason"]
+                messages_map = {
+                    "not_opened": f"❌ Bạn chưa mở **{label}**! Bấm nút \"Mở cơ sở mới\" ở `/business` trước.",
+                    "max_staff": f"❌ **{label}** đã thuê tối đa nhân viên rồi!",
+                    "insufficient_funds": f"❌ Không đủ MICK! Cần **{result.get('cost')} MICK** để thuê.",
+                }
+                text = messages_map.get(reason, "❌ Có lỗi xảy ra.")
+
+        await interaction.response.edit_message(content=text, view=None)
 
 
-@tree.command(name="business", description="Xem cơ ngơi kinh doanh của bạn")
-async def business_cmd(interaction: discord.Interaction):
-    summary = await business.get_summary(interaction.user.id)
-    embed = business.build_summary_embed(interaction.user.display_name, summary)
-    await interaction.response.send_message(embed=embed)
+class BusinessActionView(discord.ui.View):
+    def __init__(self, action: str, owner_id: int):
+        super().__init__(timeout=60)
+        self.add_item(BusinessKindSelect(action, owner_id))
 
 
-@tree.command(name="open_business", description="Mở cơ sở kinh doanh mới")
-@discord.app_commands.describe(loai="Loại hình kinh doanh")
-@discord.app_commands.choices(loai=_BIZ_CHOICES)
-async def open_business_cmd(interaction: discord.Interaction, loai: discord.app_commands.Choice[str]):
-    result = await business.open_business(interaction.user.id, loai.value)
-    if result["ok"]:
+class BusinessView(discord.ui.View):
+    """Gộp /business + /open_business + /hire cũ: 3 nút trên cùng 1 message."""
+
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=120)
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Dùng `/business` để xem cơ ngơi của riêng bạn!", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Xem tổng quan", emoji="📊", style=discord.ButtonStyle.primary)
+    async def btn_view(self, interaction: discord.Interaction, button: discord.ui.Button):
+        summary = await features.get_summary(self.owner_id)
+        embed = features.build_summary_embed(interaction.user.display_name, summary)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+    @discord.ui.button(label="Mở cơ sở mới", emoji="🏪", style=discord.ButtonStyle.success)
+    async def btn_open(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message(
-            f"🎉 Đã mở **{loai.name}**! Tốn **{result['cost']} MICK**. Dùng `/hire` để thuê nhân viên."
+            "Chọn loại hình muốn mở:", view=BusinessActionView("open", self.owner_id), ephemeral=True
         )
-        try:
-            first = await achievements.unlock(interaction.user.id, "first_business")
-            stats_based = await achievements.check_and_unlock_by_stats(interaction.user.id)
-            all_unlocked = ([first] if first else []) + stats_based
-            if all_unlocked:
-                await achievements.announce_unlocks(interaction.channel, interaction.user, all_unlocked)
-        except Exception as e:
-            log.warning("Kiểm tra thành tựu sau mở business lỗi: %s", e)
-    else:
-        reason = result["reason"]
-        if reason == "already_open":
-            await interaction.response.send_message("Bạn đã mở loại hình này rồi!", ephemeral=True)
-        elif reason == "insufficient_funds":
+
+    @discord.ui.button(label="Thuê nhân viên", emoji="👥", style=discord.ButtonStyle.secondary)
+    async def btn_hire(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            "Chọn loại hình muốn thuê thêm nhân viên:", view=BusinessActionView("hire", self.owner_id), ephemeral=True
+        )
+
+
+@tree.command(name="business", description="Xem, mở cơ sở mới, hoặc thuê nhân viên cho cơ ngơi kinh doanh")
+async def business_cmd(interaction: discord.Interaction):
+    summary = await features.get_summary(interaction.user.id)
+    embed = features.build_summary_embed(interaction.user.display_name, summary)
+    await interaction.response.send_message(embed=embed, view=BusinessView(interaction.user.id))
+
+
+# ---------------------------------------------------------------------------
+# Slash command: AI chat trực tiếp (không cần tag/reply) + Từ điển server
+# (gộp /day_tu + /tra_tu cũ, nhập liệu qua modal)
+# ---------------------------------------------------------------------------
+
+
+class TeachWordModal(discord.ui.Modal, title="Dạy từ mới cho bot"):
+    tu = discord.ui.TextInput(label="Từ / cụm từ", max_length=50, placeholder="vd: gato")
+    nghia = discord.ui.TextInput(
+        label="Nghĩa", style=discord.TextStyle.paragraph, max_length=300, placeholder="Nghĩa của từ/cụm từ đó"
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        result = await ai_chat.teach_word(str(self.tu), str(self.nghia))
+        if result["ok"]:
             await interaction.response.send_message(
-                f"Không đủ MICK! Cần **{result['cost']} MICK** để mở.", ephemeral=True
+                f"✅ Đã học: **{str(self.tu).strip().lower()}** = {str(self.nghia).strip()}"
+            )
+        elif result["reason"] == "mention_blocked":
+            await interaction.response.send_message(
+                "❌ Không thể dạy nội dung có chứa @everyone/@here.", ephemeral=True
+            )
+        elif result["reason"] == "too_long":
+            await interaction.response.send_message(
+                "❌ Từ hoặc nghĩa quá dài (từ ≤50 ký tự, nghĩa ≤300 ký tự).", ephemeral=True
             )
         else:
-            await interaction.response.send_message("Có lỗi xảy ra, thử lại sau.", ephemeral=True)
+            await interaction.response.send_message("❌ Từ hoặc nghĩa không được để trống.", ephemeral=True)
 
 
-@tree.command(name="hire", description="Thuê thêm nhân viên cho cơ sở kinh doanh")
-@discord.app_commands.describe(loai="Loại hình kinh doanh")
-@discord.app_commands.choices(loai=_BIZ_CHOICES)
-async def hire_cmd(interaction: discord.Interaction, loai: discord.app_commands.Choice[str]):
-    result = await business.hire_staff(interaction.user.id, loai.value)
-    if result["ok"]:
-        await interaction.response.send_message(
-            f"👥 Đã thuê thêm nhân viên cho **{loai.name}**! Hiện có **{result['staff']}** nhân viên. "
-            f"Tốn **{result['cost']} MICK**. Nhân viên vẫn làm việc kể cả khi bạn offline!"
-        )
-    else:
-        reason = result["reason"]
-        messages_map = {
-            "not_opened": f"Bạn chưa mở **{loai.name}**! Dùng `/open_business` trước.",
-            "max_staff": "Cơ sở này đã thuê tối đa nhân viên rồi!",
-            "insufficient_funds": f"Không đủ MICK! Cần **{result.get('cost')} MICK** để thuê.",
-        }
-        await interaction.response.send_message(
-            messages_map.get(reason, "Có lỗi xảy ra."), ephemeral=True
-        )
+class LookupWordModal(discord.ui.Modal, title="Tra từ"):
+    tu = discord.ui.TextInput(label="Từ / cụm từ muốn tra", max_length=50, placeholder="vd: gato")
+
+    async def on_submit(self, interaction: discord.Interaction):
+        word = str(self.tu)
+        data = await db.get_word(word)
+        if data.get("meaning"):
+            source_label = "member dạy" if data.get("source") == "taught" else "bot tự học"
+            await interaction.response.send_message(
+                f"📖 **{word.strip().lower()}**: {data['meaning']}\n-# ({source_label})"
+            )
+        else:
+            await interaction.response.send_message(
+                f"🤔 Bot chưa biết nghĩa của **{word.strip().lower()}**. Bấm nút \"Dạy từ\" ở `/tudien` để dạy bot nhé!",
+                ephemeral=True,
+            )
 
 
-# ---------------------------------------------------------------------------
-# Slash command: AI chat trực tiếp (không cần tag/reply)
-# ---------------------------------------------------------------------------
+class DictionaryView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=120)
+
+    @discord.ui.button(label="Tra từ", emoji="📖", style=discord.ButtonStyle.primary)
+    async def btn_lookup(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(LookupWordModal())
+
+    @discord.ui.button(label="Dạy từ", emoji="✏️", style=discord.ButtonStyle.success)
+    async def btn_teach(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TeachWordModal())
 
 
-@tree.command(name="day_tu", description="Dạy bot nghĩa của 1 từ/cụm từ lóng trong server")
-@discord.app_commands.describe(tu="Từ hoặc cụm từ", nghia="Nghĩa của từ đó")
-async def day_tu_cmd(interaction: discord.Interaction, tu: str, nghia: str):
-    result = await ai_chat.teach_word(tu, nghia)
-    if result["ok"]:
-        await interaction.response.send_message(f"✅ Đã học: **{tu.strip().lower()}** = {nghia.strip()}")
-    elif result["reason"] == "mention_blocked":
-        await interaction.response.send_message(
-            "❌ Không thể dạy nội dung có chứa @everyone/@here.", ephemeral=True
-        )
-    elif result["reason"] == "too_long":
-        await interaction.response.send_message(
-            "❌ Từ hoặc nghĩa quá dài (từ ≤50 ký tự, nghĩa ≤300 ký tự).", ephemeral=True
-        )
-    else:
-        await interaction.response.send_message("❌ Từ hoặc nghĩa không được để trống.", ephemeral=True)
-
-
-@tree.command(name="tra_tu", description="Xem bot đã học nghĩa từ/cụm từ này chưa")
-@discord.app_commands.describe(tu="Từ hoặc cụm từ muốn tra")
-async def tra_tu_cmd(interaction: discord.Interaction, tu: str):
-    data = await db.get_word(tu)
-    if data.get("meaning"):
-        source_label = "member dạy" if data.get("source") == "taught" else "bot tự học"
-        await interaction.response.send_message(
-            f"📖 **{tu.strip().lower()}**: {data['meaning']}\n-# ({source_label})"
-        )
-    else:
-        await interaction.response.send_message(
-            f"🤔 Bot chưa biết nghĩa của **{tu.strip().lower()}**. Dùng `/day_tu` để dạy bot nhé!",
-            ephemeral=True,
-        )
+@tree.command(name="tudien", description="Tra hoặc dạy bot nghĩa từ/cụm từ lóng trong server")
+async def tudien_cmd(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="📚 Từ điển server",
+        description="Bấm nút bên dưới để tra 1 từ đã học, hoặc dạy bot nghĩa 1 từ mới.",
+        color=discord.Color.blue(),
+    )
+    await interaction.response.send_message(embed=embed, view=DictionaryView(), ephemeral=True)
 
 
 @tree.command(name="ai", description="Chat trực tiếp với AI của bot (Groq)")
@@ -916,3 +1036,82 @@ async def ai_cmd(interaction: discord.Interaction, noi_dung: str):
         )
     else:
         await interaction.followup.send("😵 AI hiện chưa sẵn sàng (thiếu GROQ_API_KEY hoặc lỗi kết nối).")
+
+
+# ---------------------------------------------------------------------------
+# Slash command: Help - liệt kê toàn bộ lệnh theo nhóm, bấm nút để xem chi tiết
+# ---------------------------------------------------------------------------
+
+_HELP_CATEGORIES = [
+    {
+        "key": "level",
+        "label": "Level & Kinh tế",
+        "emoji": "📊",
+        "commands": [
+            ("/profile [thành_viên]", "Hồ sơ · Level card ảnh · Rank — bấm nút để chuyển view"),
+            ("/leaderboard [loại]", "Bảng xếp hạng Level hoặc MICK Coin"),
+            ("/atm [hành_động] [số_tiền]", "Gửi/rút MICK vào ATM, hoặc xem số dư"),
+            ("/transfer [người_nhận] [số_tiền]", "Chuyển MICK cho người khác"),
+        ],
+    },
+    {
+        "key": "game",
+        "label": "Minigame & Quest",
+        "emoji": "🎮",
+        "commands": [
+            ("/game", "Chơi Úp ly chọn kẹo hoặc Wordle — bấm nút để chọn"),
+            ("/quest", "Xem quest hằng ngày của bạn"),
+            ("/achievements", "Xem danh sách thành tựu"),
+        ],
+    },
+    {
+        "key": "business",
+        "label": "Kinh doanh",
+        "emoji": "💼",
+        "commands": [
+            ("/business", "Xem cơ ngơi · Mở cơ sở mới · Thuê nhân viên — bấm nút"),
+        ],
+    },
+    {
+        "key": "ai",
+        "label": "AI & Từ điển",
+        "emoji": "🤖",
+        "commands": [
+            ("/ai [nội_dung]", "Chat trực tiếp với AI của bot"),
+            ("/tudien", "Tra từ hoặc dạy bot nghĩa từ mới — bấm nút, nhập qua form"),
+        ],
+    },
+]
+
+
+def _build_help_category_embed(cat: dict) -> discord.Embed:
+    embed = discord.Embed(title=f"{cat['emoji']} {cat['label']}", color=discord.Color.blurple())
+    for name, desc in cat["commands"]:
+        embed.add_field(name=name, value=desc, inline=False)
+    return embed
+
+
+class HelpView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=180)
+        for cat in _HELP_CATEGORIES:
+            self.add_item(self._make_button(cat))
+
+    def _make_button(self, cat: dict) -> discord.ui.Button:
+        button = discord.ui.Button(label=cat["label"], emoji=cat["emoji"], style=discord.ButtonStyle.secondary)
+
+        async def callback(interaction: discord.Interaction):
+            await interaction.response.edit_message(embed=_build_help_category_embed(cat), view=self)
+
+        button.callback = callback
+        return button
+
+
+@tree.command(name="help", description="Xem danh sách lệnh của bot theo từng nhóm")
+async def help_cmd(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="📖 Trợ giúp",
+        description="Bấm nút bên dưới để xem lệnh theo từng nhóm.",
+        color=discord.Color.blurple(),
+    )
+    await interaction.response.send_message(embed=embed, view=HelpView(), ephemeral=True)

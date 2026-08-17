@@ -23,7 +23,7 @@ _FONT_REGULAR_PATH = os.path.join(_FONT_DIR, "DejaVuSans.ttf")
 # Kích thước card
 _W, _H = 934, 282
 _PAD = 40
-_AVATAR_SIZE = 210
+_AVATAR_SIZE = 168
 _CORNER_RADIUS = 28
 
 _BG_COLOR = (26, 26, 26)
@@ -76,15 +76,15 @@ async def render_level_card(
 ) -> io.BytesIO:
     """Render 1 card level dạng ảnh PNG, trả về BytesIO sẵn sàng gửi qua discord.File."""
     card = Image.new("RGB", (_W, _H), _BG_COLOR)
-    mask = _rounded_mask((_W, _H), _CORNER_RADIUS)
-    rounded = Image.new("RGB", (_W, _H), _BG_COLOR)
-    rounded.paste(card, (0, 0))
-
+    rounded = card  # vẽ trực tiếp lên card, bo góc được áp dụng ở bước cuối (mask)
     draw = ImageDraw.Draw(rounded)
 
     # --- Avatar (bên phải, bo góc) ---
+    # Lưu ý: avatar PHẢI dừng lại trước khi chạm vào hàng thanh XP/"Level N" ở
+    # dưới - trước đây avatar_y canh giữa theo CHIỀU CAO TOÀN BỘ card (282px)
+    # với avatar to 210px nên tràn xuống đè lên chữ "Level" và thanh XP.
     avatar_x = _W - _PAD - _AVATAR_SIZE
-    avatar_y = (_H - _AVATAR_SIZE) // 2
+    avatar_y = 28
     avatar_bytes = await _download_avatar_bytes(avatar_url)
     if avatar_bytes:
         try:
@@ -127,7 +127,13 @@ async def render_level_card(
     level_w = level_bbox[2] - level_bbox[0]
     draw.text((bar_x1 - level_w, bar_y0 - 40), level_text, font=info_font, fill=_SUBTEXT_COLOR)
 
+    # --- Áp mask bo góc cho card (trước đây mask bị tính nhưng không dùng tới,
+    # khiến card render ra hình chữ nhật vuông thay vì bo góc) ---
+    mask = _rounded_mask((_W, _H), _CORNER_RADIUS)
+    final = Image.new("RGBA", (_W, _H), (0, 0, 0, 0))
+    final.paste(rounded, (0, 0), mask)
+
     buf = io.BytesIO()
-    rounded.save(buf, format="PNG")
+    final.save(buf, format="PNG")
     buf.seek(0)
     return buf
