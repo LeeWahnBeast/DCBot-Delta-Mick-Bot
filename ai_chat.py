@@ -106,11 +106,34 @@ async def learn_from_message(content: str) -> None:
         update = {"count": count, "last_seen": int(time.time())}
         await db.save_word(word, update)
 
-        # Chưa có nghĩa và đã gặp đủ nhiều lần -> tra nghĩa
+        # Chưa có nghĩa và đã gặp đủ nhiều lần -> tự tra nghĩa qua Groq
         if not existing.get("meaning") and count >= 3:
             meaning = await _lookup_meaning_online(word)
             if meaning:
-                await db.save_word(word, {"meaning": meaning})
+                await db.save_word(word, {"meaning": meaning, "source": "auto"})
+
+
+_MENTION_EVERYONE_RE = re.compile(r"@(everyone|here)\b", re.IGNORECASE)
+
+
+async def teach_word(word: str, meaning: str) -> dict:
+    """Member chủ động dạy nghĩa 1 từ/cụm từ cho bot.
+
+    Trả về {"ok": True} nếu lưu thành công, hoặc {"ok": False, "reason": ...}
+    nếu bị chặn (vd. cố dạy nội dung ping @everyone/@here).
+    """
+    word = word.strip().lower()
+    meaning = meaning.strip()
+
+    if not word or not meaning:
+        return {"ok": False, "reason": "empty"}
+    if _MENTION_EVERYONE_RE.search(word) or _MENTION_EVERYONE_RE.search(meaning):
+        return {"ok": False, "reason": "mention_blocked"}
+    if len(word) > 50 or len(meaning) > 300:
+        return {"ok": False, "reason": "too_long"}
+
+    await db.save_word(word, {"meaning": meaning, "source": "taught", "last_seen": int(time.time())})
+    return {"ok": True}
 
 
 async def _lookup_meaning_online(word: str) -> str | None:
@@ -133,10 +156,21 @@ async def _lookup_meaning_online(word: str) -> str | None:
 
 
 async def _build_slang_context(limit: int = 12) -> str:
-    """Lấy vài từ lóng đã học kèm nghĩa, thêm vào system prompt để bot 'hiểu' server."""
-    # đơn giản hóa: không list toàn bộ DB (không có query "top N" generic ở đây),
-    # nên phần này chỉ là placeholder mở rộng sau nếu cần list toàn bộ ai_words.
-    return ""
+    """Lấy vài từ lóng đã học (ưu tiên từ member tự dạy, rồi tới tự học nhiều lần
+    nhất) kèm nghĩa, thêm vào system prompt để bot 'hiểu' tiếng lóng của server."""
+    words = await db.get_learned_words()
+    known = [(w, d) for w, d in words if d.get("meaning")]
+    if not known:
+        return ""
+
+    known.sort(key=lambda x: (x[1].get("source") == "taught", x[1].get("count", 0)), reverse=True)
+    top = known[:limit]
+
+    lines = [f'- "{w}": {d["meaning"]}' for w, d in top]
+    return (
+        "\n\nMột số từ lóng/thuật ngữ riêng của server này mà bạn đã học được, "
+        "dùng để hiểu ngữ cảnh khi cần (không bắt buộc nhắc lại):\n" + "\n".join(lines)
+    )
 
 
 def wants_bot_reply(message: discord.Message, bot_user: discord.ClientUser) -> bool:
