@@ -139,20 +139,42 @@ async def get_user(user_id: int) -> dict:
     return merged
 
 
-async def get_all_users() -> list[tuple[str, dict]]:
-    """Trả về [(user_id_str, data), ...] toàn bộ user - dùng cho leaderboard/business tick."""
+_all_users_cache: list[tuple[str, dict]] | None = None
+_all_users_cache_ts: float = 0.0
+_ALL_USERS_CACHE_TTL = 60  # giây
+
+
+async def get_all_users(use_cache: bool = True) -> list[tuple[str, dict]]:
+    """Trả về [(user_id_str, data), ...] toàn bộ user - dùng cho leaderboard/business tick.
+
+    Có cache RAM 60s (use_cache=True) để tránh đọc lại toàn bộ collection Firestore
+    mỗi lần user gọi /rank hoặc /leaderboard (đỡ tốn quota + nhanh hơn trên free tier).
+    Khi save_user() được gọi, cache sẽ tự invalidate.
+    """
+    global _all_users_cache, _all_users_cache_ts
+    import time as _time
+
+    if use_cache and _all_users_cache is not None and (_time.time() - _all_users_cache_ts) < _ALL_USERS_CACHE_TTL:
+        return _all_users_cache
+
     if _use_memory_fallback:
         out = []
         for key, val in _memory_store.items():
             if key.startswith("users/"):
                 out.append((key.split("/", 1)[1], dict(val)))
-        return out
-    docs = [d async for d in _client.collection("users").stream()]
-    return [(d.id, d.to_dict() or {}) for d in docs]
+    else:
+        docs = [d async for d in _client.collection("users").stream()]
+        out = [(d.id, d.to_dict() or {}) for d in docs]
+
+    _all_users_cache = out
+    _all_users_cache_ts = _time.time()
+    return out
 
 
 async def save_user(user_id: int, data: dict) -> None:
+    global _all_users_cache
     await _set_doc("users", str(user_id), data, merge=True)
+    _all_users_cache = None
 
 
 # ---------------------------------------------------------------------------
