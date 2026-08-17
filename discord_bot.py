@@ -849,6 +849,40 @@ async def hire_cmd(interaction: discord.Interaction, loai: discord.app_commands.
 # ---------------------------------------------------------------------------
 
 
+@tree.command(name="day_tu", description="Dạy bot nghĩa của 1 từ/cụm từ lóng trong server")
+@discord.app_commands.describe(tu="Từ hoặc cụm từ", nghia="Nghĩa của từ đó")
+async def day_tu_cmd(interaction: discord.Interaction, tu: str, nghia: str):
+    result = await ai_chat.teach_word(tu, nghia)
+    if result["ok"]:
+        await interaction.response.send_message(f"✅ Đã học: **{tu.strip().lower()}** = {nghia.strip()}")
+    elif result["reason"] == "mention_blocked":
+        await interaction.response.send_message(
+            "❌ Không thể dạy nội dung có chứa @everyone/@here.", ephemeral=True
+        )
+    elif result["reason"] == "too_long":
+        await interaction.response.send_message(
+            "❌ Từ hoặc nghĩa quá dài (từ ≤50 ký tự, nghĩa ≤300 ký tự).", ephemeral=True
+        )
+    else:
+        await interaction.response.send_message("❌ Từ hoặc nghĩa không được để trống.", ephemeral=True)
+
+
+@tree.command(name="tra_tu", description="Xem bot đã học nghĩa từ/cụm từ này chưa")
+@discord.app_commands.describe(tu="Từ hoặc cụm từ muốn tra")
+async def tra_tu_cmd(interaction: discord.Interaction, tu: str):
+    data = await db.get_word(tu)
+    if data.get("meaning"):
+        source_label = "member dạy" if data.get("source") == "taught" else "bot tự học"
+        await interaction.response.send_message(
+            f"📖 **{tu.strip().lower()}**: {data['meaning']}\n-# ({source_label})"
+        )
+    else:
+        await interaction.response.send_message(
+            f"🤔 Bot chưa biết nghĩa của **{tu.strip().lower()}**. Dùng `/day_tu` để dạy bot nhé!",
+            ephemeral=True,
+        )
+
+
 @tree.command(name="ai", description="Chat trực tiếp với AI của bot (Groq)")
 @discord.app_commands.describe(noi_dung="Bạn muốn nói gì với bot?")
 async def ai_cmd(interaction: discord.Interaction, noi_dung: str):
