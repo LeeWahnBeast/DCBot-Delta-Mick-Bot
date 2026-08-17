@@ -22,7 +22,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>TikTok Discord Bot - Dashboard</title>
+<title>Delta Mick Bot Discord Bot - Dashboard</title>
 <style>
   :root { color-scheme: dark; }
   body {
@@ -56,7 +56,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
   <div class="card">
-    <h1>🎬 TikTok Discord Bot</h1>
+    <h1>😎Delta Mick Bot - Discord Bot</h1>
     <p class="sub">Theo dõi trạng thái bot theo thời gian thực.</p>
 
     <div class="stat-row">
