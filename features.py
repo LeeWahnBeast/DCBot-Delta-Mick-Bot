@@ -45,6 +45,11 @@ from config import (
     BUSINESS_HIRE_COST,
     BUSINESS_MAX_STAFF,
     BUSINESS_TICK_SEC,
+    TAIXIU_PAYOUT_MULTIPLIER,
+    XIDACH_PAYOUT_MULTIPLIER,
+    XIDACH_BONUS_MULTIPLIER,
+    TRIVIA_REWARD_MICK,
+    TRIVIA_TIMEOUT_SEC,
 )
 
 # ===========================================================================
@@ -302,22 +307,28 @@ async def _handle_claim(interaction: discord.Interaction):
         return
 
     user_id = interaction.user.id
-    user = await db.get_user(user_id)
-    if user.get("last_daily_date") == today:
-        await interaction.response.send_message("✅ Bạn đã nhận Daily hôm nay rồi!", ephemeral=True)
-        return
 
-    daily_state = await db.get_daily_state()
-    reset_epoch = daily_state.get("reset_at_epoch")
-    if not reset_epoch or daily_state.get("date") != today:
-        # Phòng trường hợp bot restart lệch nhịp và chưa có mốc reset hôm nay.
-        reset_epoch = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+    # Lock theo user_id: chặn double-claim khi bấm nút 2 lần liền/lag mạng
+    # (2 request đọc "last_daily_date" cũ cùng lúc trước khi cái đầu ghi xong).
+    async with economy.user_lock(user_id):
+        user = await db.get_user(user_id)
+        if user.get("last_daily_date") == today:
+            await interaction.response.send_message("✅ Bạn đã nhận Daily hôm nay rồi!", ephemeral=True)
+            return
 
-    hours_elapsed = int((time.time() - reset_epoch) // 3600)
-    reward = compute_daily_reward(hours_elapsed)
+        daily_state = await db.get_daily_state()
+        reset_epoch = daily_state.get("reset_at_epoch")
+        if not reset_epoch or daily_state.get("date") != today:
+            # Phòng trường hợp bot restart lệch nhịp và chưa có mốc reset hôm nay.
+            reset_epoch = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
 
-    new_balance = await economy.add_mick(user_id, reward)
-    await db.save_user(user_id, {"last_daily_date": today})
+        hours_elapsed = int((time.time() - reset_epoch) // 3600)
+        reward = compute_daily_reward(hours_elapsed)
+
+        # Ghi thẳng ở đây (không gọi economy.add_mick) vì đang ở trong
+        # user_lock rồi -> asyncio.Lock không reentrant, gọi lại sẽ deadlock.
+        new_balance = max(0, user["mick"] + reward)
+        await db.save_user(user_id, {"last_daily_date": today, "mick": new_balance})
 
     await interaction.response.send_message(
         f"🎁 Bạn nhận được **{reward} MICK**! (Số dư hiện tại: **{new_balance} MICK**)", ephemeral=True
@@ -367,6 +378,9 @@ GAME_TYPE_LABELS = {
     "wordle": "🟩 Wordle",
     "guess_number": "🔢 Đoán số",
     "rps": "✊ Kéo Búa Bao",
+    "taixiu": "🎲 Tài Xỉu",
+    "xidach": "🃏 Xì Dách",
+    "trivia": "🧠 Trivia",
 }
 
 _GAME_STATUS_LABELS = {
@@ -666,6 +680,355 @@ async def process_rps(game_id: str, player_choice: str) -> discord.Embed | None:
         color=color,
     )
     return embed
+
+
+# ===========================================================================
+# Casino: Tài Xỉu (lắc 3 xúc xắc, tổng 11-18 = Tài, 3-10 = Xỉu)
+#
+# Khác với Wordle/Đoán số/RPS (không mất tiền để chơi), 2 game casino này ăn
+# thua MICK thật -> tiền cược bị trừ NGAY LÚC ĐẶT qua economy.place_bet()
+# (atomic, có lock user_id) để không thể lách cược vượt số dư bằng cách spam
+# nhiều lệnh cùng lúc - học từ bug dupe MICK ở /chuyển-tiền trước đó.
+# ===========================================================================
+
+
+def start_taixiu(user_id: int, bet: int, wallet_after_bet: int) -> tuple[str, discord.Embed]:
+    gid = _new_game_id()
+    _active_games[gid] = {
+        "type": "taixiu",
+        "owner_id": user_id,
+        "status": "playing",
+        "created_at": time.time(),
+        "bet": bet,
+    }
+    embed = discord.Embed(
+        title=f"🎲 Tài Xỉu · #{gid}",
+        description=(
+            f"Cược **{bet} MICK** đã bị trừ (số dư còn: **{wallet_after_bet}**).\n"
+            f"Chọn **Tài** (11-18) hoặc **Xỉu** (3-10) bên dưới rồi bot lắc 3 xúc xắc!"
+        ),
+        color=discord.Color.gold(),
+    )
+    embed.set_footer(text=f"Thắng ăn x{TAIXIU_PAYOUT_MULTIPLIER:.0f} tiền cược")
+    return gid, embed
+
+
+async def process_taixiu(game_id: str, choice: str) -> discord.Embed | None:
+    """choice: 'tai' hoặc 'xiu'. Trả None nếu ván không hợp lệ."""
+    game = _active_games.get(game_id)
+    if not game or game["type"] != "taixiu" or game["status"] != "playing":
+        return None
+
+    dice = [random.randint(1, 6) for _ in range(3)]
+    total = sum(dice)
+    result = "tai" if total >= 11 else "xiu"
+    user_id = game["owner_id"]
+    bet = game["bet"]
+    dice_text = " ".join(f"🎲{d}" for d in dice)
+
+    won = choice == result
+    if won:
+        payout = round(bet * TAIXIU_PAYOUT_MULTIPLIER)
+        new_balance = await economy.add_mick(user_id, payout)
+        desc = (
+            f"{dice_text} = **{total}** → **{'Tài' if result == 'tai' else 'Xỉu'}**\n\n"
+            f"🎉 Bạn thắng! Nhận **{payout} MICK** (số dư: {new_balance})"
+        )
+        color, status = discord.Color.green(), "won"
+    else:
+        desc = (
+            f"{dice_text} = **{total}** → **{'Tài' if result == 'tai' else 'Xỉu'}**\n\n"
+            f"😵 Bạn thua, mất **{bet} MICK** đã cược."
+        )
+        color, status = discord.Color.red(), "lost"
+
+    game["status"] = status
+    game["finished_at"] = time.time()
+    game["summary"] = f"Cược {bet} MICK vào {choice} · Kết quả xúc xắc: {total} ({result}) → {status}"
+
+    embed = discord.Embed(title=f"🎲 Tài Xỉu - Kết quả · #{game_id}", description=desc, color=color)
+    return embed
+
+
+# ===========================================================================
+# Casino: Xì Dách (Blackjack rút gọn) - rút bài đấu bot, gần 21 nhất thắng,
+# quá 21 (quắc) thua luôn. Xì Bàng (2 lá = 21, có Át) hoặc Ngũ Linh (5 lá
+# không quắc) ăn x3, thắng thường ăn x2.
+# ===========================================================================
+
+_CARD_RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
+
+
+def _card_value(rank: str) -> int:
+    if rank == "A":
+        return 11  # tính đơn giản: Át = 11, cộng thêm bù trừ ở _hand_value
+    if rank in ("J", "Q", "K"):
+        return 10
+    return int(rank)
+
+
+def _hand_value(hand: list[str]) -> int:
+    total = sum(_card_value(r) for r in hand)
+    aces = hand.count("A")
+    while total > 21 and aces > 0:
+        total -= 10  # Át tính lại thành 1 thay vì 11 để đỡ quắc
+        aces -= 1
+    return total
+
+
+def _draw_card() -> str:
+    return random.choice(_CARD_RANKS)
+
+
+def _hand_text(hand: list[str]) -> str:
+    return " ".join(hand) + f" (= {_hand_value(hand)})"
+
+
+def start_xidach(user_id: int, bet: int, wallet_after_bet: int) -> tuple[str, discord.Embed]:
+    gid = _new_game_id()
+    player = [_draw_card(), _draw_card()]
+    bot_hand = [_draw_card(), _draw_card()]
+    _active_games[gid] = {
+        "type": "xidach",
+        "owner_id": user_id,
+        "status": "playing",
+        "created_at": time.time(),
+        "bet": bet,
+        "player": player,
+        "bot": bot_hand,
+    }
+
+    player_val = _hand_value(player)
+    desc = (
+        f"Cược **{bet} MICK** đã bị trừ (số dư còn: **{wallet_after_bet}**).\n\n"
+        f"Bài của bạn: {_hand_text(player)}\n"
+        f"Bài bot: {bot_hand[0]} ❓\n\n"
+        f"Bấm **Rút thêm** để lấy 1 lá, hoặc **Dằn bài** để dừng và so bài với bot."
+    )
+    if player_val == 21:
+        desc += "\n\n✨ **Xì Bàng!** (21 điểm với 2 lá) — dằn bài để ăn x3!"
+
+    embed = discord.Embed(title=f"🃏 Xì Dách · #{gid}", description=desc, color=discord.Color.gold())
+    embed.set_footer(text=f"Thắng ăn x{XIDACH_PAYOUT_MULTIPLIER:.0f} · Xì Bàng/Ngũ Linh ăn x{XIDACH_BONUS_MULTIPLIER:.0f}")
+    return gid, embed
+
+
+def xidach_draw(game_id: str) -> tuple[discord.Embed, bool] | None:
+    """Người chơi rút thêm 1 lá. Trả (embed, finished). finished=True nếu quắc (>21)."""
+    game = _active_games.get(game_id)
+    if not game or game["type"] != "xidach" or game["status"] != "playing":
+        return None
+
+    game["player"].append(_draw_card())
+    player_val = _hand_value(game["player"])
+
+    if player_val > 21:
+        bet = game["bet"]
+        game["status"] = "lost"
+        game["finished_at"] = time.time()
+        game["summary"] = f"Cược {bet} MICK · Quắc {player_val} điểm → thua"
+        embed = discord.Embed(
+            title=f"🃏 Xì Dách - Quắc rồi! · #{game_id}",
+            description=(
+                f"Bài của bạn: {_hand_text(game['player'])}\n\n"
+                f"💥 Quắc! Quá 21 điểm, bạn mất **{bet} MICK** đã cược."
+            ),
+            color=discord.Color.red(),
+        )
+        return embed, True
+
+    embed = discord.Embed(
+        title=f"🃏 Xì Dách · #{game_id}",
+        description=(
+            f"Bài của bạn: {_hand_text(game['player'])}\n"
+            f"Bài bot: {game['bot'][0]} ❓\n\n"
+            f"Bấm **Rút thêm** để lấy thêm 1 lá, hoặc **Dằn bài** để dừng."
+        ),
+        color=discord.Color.gold(),
+    )
+    return embed, False
+
+
+async def xidach_stand(game_id: str) -> discord.Embed | None:
+    """Người chơi dằn bài: bot tự rút đến khi >=17 điểm, rồi so bài."""
+    game = _active_games.get(game_id)
+    if not game or game["type"] != "xidach" or game["status"] != "playing":
+        return None
+
+    user_id = game["owner_id"]
+    bet = game["bet"]
+    player = game["player"]
+    bot_hand = game["bot"]
+
+    while _hand_value(bot_hand) < 17:
+        bot_hand.append(_draw_card())
+
+    player_val = _hand_value(player)
+    bot_val = _hand_value(bot_hand)
+    bot_bust = bot_val > 21
+
+    # Xì Bàng: đúng 21 với 2 lá đầu (kèm Át). Ngũ Linh: 5 lá mà không quắc.
+    is_xi_bang = player_val == 21 and len(player) == 2
+    is_ngu_linh = len(player) >= 5 and player_val <= 21
+    is_bonus = is_xi_bang or is_ngu_linh
+
+    if bot_bust or player_val > bot_val:
+        multiplier = XIDACH_BONUS_MULTIPLIER if is_bonus else XIDACH_PAYOUT_MULTIPLIER
+        payout = round(bet * multiplier)
+        new_balance = await economy.add_mick(user_id, payout)
+        bonus_text = " ✨ (Xì Bàng/Ngũ Linh, ăn x{:.0f}!)".format(XIDACH_BONUS_MULTIPLIER) if is_bonus else ""
+        desc = (
+            f"Bài của bạn: {_hand_text(player)}\nBài bot: {_hand_text(bot_hand)}"
+            f"{' (quắc!)' if bot_bust else ''}\n\n"
+            f"🎉 Bạn thắng!{bonus_text} Nhận **{payout} MICK** (số dư: {new_balance})"
+        )
+        color, status = discord.Color.green(), "won"
+    elif player_val == bot_val:
+        new_balance = await economy.add_mick(user_id, bet)  # hòa: trả lại tiền cược
+        desc = (
+            f"Bài của bạn: {_hand_text(player)}\nBài bot: {_hand_text(bot_hand)}\n\n"
+            f"🤝 Hòa! Bạn được trả lại **{bet} MICK** đã cược (số dư: {new_balance})"
+        )
+        color, status = discord.Color.greyple(), "draw"
+    else:
+        desc = (
+            f"Bài của bạn: {_hand_text(player)}\nBài bot: {_hand_text(bot_hand)}\n\n"
+            f"😵 Bạn thua, mất **{bet} MICK** đã cược."
+        )
+        color, status = discord.Color.red(), "lost"
+
+    game["status"] = status
+    game["finished_at"] = time.time()
+    game["summary"] = f"Cược {bet} MICK · Bạn {player_val} vs Bot {bot_val} → {status}"
+
+    return discord.Embed(title=f"🃏 Xì Dách - Kết quả · #{game_id}", description=desc, color=color)
+
+
+# ===========================================================================
+# Trivia đố vui: không cược tiền, trả lời đúng nhận thưởng cố định
+# (TRIVIA_REWARD_MICK). Câu hỏi lấy ngẫu nhiên từ bộ có sẵn.
+# ===========================================================================
+
+_TRIVIA_QUESTIONS = [
+    {"q": "Thủ đô của Việt Nam là gì?", "options": ["Hà Nội", "TP.HCM", "Đà Nẵng", "Huế"], "answer": 0},
+    {"q": "Hành tinh nào gần Mặt Trời nhất?", "options": ["Sao Kim", "Sao Thủy", "Trái Đất", "Sao Hỏa"], "answer": 1},
+    {"q": "1 giờ có bao nhiêu phút?", "options": ["100", "24", "60", "30"], "answer": 2},
+    {"q": "Ngôn ngữ lập trình nào dùng để viết Minecraft Bedrock addon?", "options": ["Python", "JavaScript", "Java thuần", "C#"], "answer": 1},
+    {"q": "Con vật nào được coi là 'vua rừng xanh'?", "options": ["Voi", "Hổ", "Sư tử", "Gấu"], "answer": 2},
+    {"q": "Nước nào có diện tích lớn nhất thế giới?", "options": ["Trung Quốc", "Mỹ", "Canada", "Nga"], "answer": 3},
+    {"q": "Đơn vị đo tốc độ khung hình trong game thường gọi là gì?", "options": ["FPS", "MPH", "RPM", "GHz"], "answer": 0},
+    {"q": "Số nào là số nguyên tố?", "options": ["9", "15", "17", "21"], "answer": 2},
+]
+
+
+def start_trivia(user_id: int) -> tuple[str, discord.Embed, list[str]]:
+    gid = _new_game_id()
+    q = random.choice(_TRIVIA_QUESTIONS)
+    _active_games[gid] = {
+        "type": "trivia",
+        "owner_id": user_id,
+        "status": "playing",
+        "created_at": time.time(),
+        "question": q["q"],
+        "options": q["options"],
+        "answer_index": q["answer"],
+    }
+    embed = discord.Embed(
+        title=f"🧠 Trivia · #{gid}",
+        description=q["q"],
+        color=discord.Color.blurple(),
+    )
+    embed.set_footer(text=f"Trả lời đúng nhận {TRIVIA_REWARD_MICK} MICK · {TRIVIA_TIMEOUT_SEC}s để trả lời")
+    return gid, embed, q["options"]
+
+
+async def process_trivia(game_id: str, chosen_index: int) -> discord.Embed | None:
+    game = _active_games.get(game_id)
+    if not game or game["type"] != "trivia" or game["status"] != "playing":
+        return None
+
+    correct_index = game["answer_index"]
+    options = game["options"]
+    user_id = game["owner_id"]
+    won = chosen_index == correct_index
+
+    if won:
+        new_balance = await economy.add_mick(user_id, TRIVIA_REWARD_MICK)
+        desc = f"✅ Chính xác! Đáp án là **{options[correct_index]}**.\nBạn nhận **{TRIVIA_REWARD_MICK} MICK** (số dư: {new_balance})"
+        color, status = discord.Color.green(), "won"
+    else:
+        desc = f"❌ Sai rồi! Đáp án đúng là **{options[correct_index]}**."
+        color, status = discord.Color.red(), "lost"
+
+    game["status"] = status
+    game["finished_at"] = time.time()
+    game["summary"] = f"Câu hỏi: {game['question']} · Chọn: {options[chosen_index]} → {status}"
+
+    return discord.Embed(title=f"🧠 Trivia - Kết quả · #{game_id}", description=desc, color=color)
+
+
+async def trivia_timeout(game_id: str) -> None:
+    """Gọi khi hết giờ mà chưa trả lời - đánh dấu ván kết thúc (thua, không cộng gì)."""
+    game = _active_games.get(game_id)
+    if not game or game["type"] != "trivia" or game["status"] != "playing":
+        return
+    game["status"] = "lost"
+    game["finished_at"] = time.time()
+    game["summary"] = f"Câu hỏi: {game['question']} · Hết giờ, không trả lời"
+
+
+# ===========================================================================
+# OTP xác minh /chuyển-tiền qua DM
+#
+# Lưu trong RAM (không cần bền qua restart, OTP chỉ sống TRANSFER_OTP_TTL_SEC
+# giây). Key theo user_id vì 1 người chỉ nên có 1 giao dịch chờ xác minh tại
+# 1 thời điểm - tạo OTP mới sẽ ghi đè OTP cũ của chính họ (huỷ giao dịch cũ).
+# ===========================================================================
+
+# user_id -> {"code", "to_id", "amount", "expires_at", "attempts"}
+_pending_transfers: dict[int, dict] = {}
+
+
+def create_transfer_otp(user_id: int, to_id: int, amount: int) -> str:
+    from config import TRANSFER_OTP_LENGTH, TRANSFER_OTP_TTL_SEC
+
+    code = "".join(random.choices(string.digits, k=TRANSFER_OTP_LENGTH))
+    _pending_transfers[user_id] = {
+        "code": code,
+        "to_id": to_id,
+        "amount": amount,
+        "expires_at": time.time() + TRANSFER_OTP_TTL_SEC,
+        "attempts": 0,
+    }
+    return code
+
+
+def verify_transfer_otp(user_id: int, entered_code: str) -> dict:
+    """Trả {ok, reason?, to_id?, amount?}. reason: expired/not_found/wrong_code/too_many_attempts."""
+    from config import TRANSFER_OTP_MAX_ATTEMPTS
+
+    pending = _pending_transfers.get(user_id)
+    if not pending:
+        return {"ok": False, "reason": "not_found"}
+
+    if time.time() > pending["expires_at"]:
+        _pending_transfers.pop(user_id, None)
+        return {"ok": False, "reason": "expired"}
+
+    if pending["attempts"] >= TRANSFER_OTP_MAX_ATTEMPTS:
+        _pending_transfers.pop(user_id, None)
+        return {"ok": False, "reason": "too_many_attempts"}
+
+    if entered_code.strip() != pending["code"]:
+        pending["attempts"] += 1
+        return {"ok": False, "reason": "wrong_code"}
+
+    _pending_transfers.pop(user_id, None)  # dùng 1 lần, xong xoá luôn
+    return {"ok": True, "to_id": pending["to_id"], "amount": pending["amount"]}
+
+
+def cancel_transfer_otp(user_id: int) -> None:
+    _pending_transfers.pop(user_id, None)
 
 
 # ===========================================================================

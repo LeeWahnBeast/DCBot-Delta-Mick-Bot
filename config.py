@@ -66,6 +66,23 @@ RPS_WIN_REWARD = int(os.environ.get("RPS_WIN_REWARD", "6"))
 # Ván minigame đã kết thúc vẫn tra được bằng ID trong khoảng thời gian này (giây)
 GAME_LOOKUP_TTL_SEC = int(os.environ.get("GAME_LOOKUP_TTL_SEC", "600"))
 
+# --- Casino: Tài Xỉu (thắng ăn x2 tiền cược) ---
+TAIXIU_PAYOUT_MULTIPLIER = float(os.environ.get("TAIXIU_PAYOUT_MULTIPLIER", "2.0"))
+
+# --- Casino: Xì Dách (thắng ăn x2, Xì Bàng/Ngũ Linh ăn x3) ---
+XIDACH_PAYOUT_MULTIPLIER = float(os.environ.get("XIDACH_PAYOUT_MULTIPLIER", "2.0"))
+XIDACH_BONUS_MULTIPLIER = float(os.environ.get("XIDACH_BONUS_MULTIPLIER", "3.0"))
+
+# --- Trivia đố vui (không cược, thưởng cố định) ---
+TRIVIA_REWARD_MICK = int(os.environ.get("TRIVIA_REWARD_MICK", "10"))
+TRIVIA_TIMEOUT_SEC = int(os.environ.get("TRIVIA_TIMEOUT_SEC", "30"))
+
+# --- OTP xác minh chuyển tiền qua DM ---
+TRANSFER_OTP_ENABLED = True
+TRANSFER_OTP_LENGTH = int(os.environ.get("TRANSFER_OTP_LENGTH", "6"))
+TRANSFER_OTP_TTL_SEC = int(os.environ.get("TRANSFER_OTP_TTL_SEC", "120"))
+TRANSFER_OTP_MAX_ATTEMPTS = int(os.environ.get("TRANSFER_OTP_MAX_ATTEMPTS", "3"))
+
 # --- Emoji / kênh chung ---
 MICKCOIN_EMOJI = os.environ.get("MICKCOIN_EMOJI", "<:mickcoin:1538841771935531038>")
 QUEST_CHANNEL_ID = int(os.environ.get("QUEST_CHANNEL_ID", "1528590477073584138"))

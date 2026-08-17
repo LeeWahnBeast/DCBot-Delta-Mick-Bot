@@ -44,6 +44,9 @@ from config import (
     BUSINESS_TICK_SEC,
     MICKCOIN_EMOJI,
     GUESS_NUMBER_MAX,
+    TRANSFER_OTP_LENGTH,
+    TRANSFER_OTP_TTL_SEC,
+    TRIVIA_TIMEOUT_SEC,
     log,
 )
 from tiktok_client import TikTokClient
@@ -842,6 +845,149 @@ class RPSView(discord.ui.View):
             child.disabled = True
 
 
+class BetAmountModal(discord.ui.Modal, title="Nhập số MICK muốn cược"):
+    def __init__(self, game_kind: str):
+        super().__init__()
+        self.game_kind = game_kind  # "taixiu" hoặc "xidach"
+        self.so_tien = discord.ui.TextInput(
+            label="Số MICK muốn cược", max_length=10, placeholder="vd: 50"
+        )
+        self.add_item(self.so_tien)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = str(self.so_tien).strip()
+        if not raw.isdigit() or int(raw) <= 0:
+            await interaction.response.send_message("❌ Phải nhập số nguyên dương hợp lệ!", ephemeral=True)
+            return
+
+        bet = int(raw)
+        result = await economy.place_bet(interaction.user.id, bet)
+        if not result["ok"]:
+            reason = "Số dư không đủ!" if result["reason"] == "insufficient_funds" else "Số tiền không hợp lệ!"
+            await interaction.response.send_message(f"❌ {reason}", ephemeral=True)
+            return
+
+        owner_id = interaction.user.id
+        if self.game_kind == "taixiu":
+            gid, embed = features.start_taixiu(owner_id, bet, result["wallet"])
+            await interaction.response.send_message(embed=embed, view=TaiXiuView(gid, owner_id))
+        else:
+            gid, embed = features.start_xidach(owner_id, bet, result["wallet"])
+            await interaction.response.send_message(embed=embed, view=XiDachView(gid, owner_id))
+
+
+class TaiXiuView(discord.ui.View):
+    def __init__(self, game_id: str, owner_id: int):
+        super().__init__(timeout=60)
+        self.game_id = game_id
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Đây không phải ván của bạn!", ephemeral=True)
+            return False
+        return True
+
+    async def _play(self, interaction: discord.Interaction, choice: str):
+        embed = await features.process_taixiu(self.game_id, choice)
+        if embed is None:
+            await interaction.response.send_message("❌ Ván này đã kết thúc hoặc không tồn tại!", ephemeral=True)
+            return
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(embed=embed, view=self)
+        await _finish_minigame(interaction, self.owner_id)
+        self.stop()
+
+    @discord.ui.button(label="Tài (11-18)", emoji="⬆️", style=discord.ButtonStyle.success)
+    async def btn_tai(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._play(interaction, "tai")
+
+    @discord.ui.button(label="Xỉu (3-10)", emoji="⬇️", style=discord.ButtonStyle.danger)
+    async def btn_xiu(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._play(interaction, "xiu")
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+
+class XiDachView(discord.ui.View):
+    def __init__(self, game_id: str, owner_id: int):
+        super().__init__(timeout=120)
+        self.game_id = game_id
+        self.owner_id = owner_id
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Đây không phải ván của bạn!", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Rút thêm", emoji="🃏", style=discord.ButtonStyle.primary)
+    async def btn_draw(self, interaction: discord.Interaction, button: discord.ui.Button):
+        result = features.xidach_draw(self.game_id)
+        if result is None:
+            await interaction.response.send_message("❌ Ván này đã kết thúc hoặc không tồn tại!", ephemeral=True)
+            return
+        embed, finished = result
+        view = None if finished else self
+        await interaction.response.edit_message(embed=embed, view=view)
+        if finished:
+            await _finish_minigame(interaction, self.owner_id)
+            self.stop()
+
+    @discord.ui.button(label="Dằn bài", emoji="✋", style=discord.ButtonStyle.success)
+    async def btn_stand(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = await features.xidach_stand(self.game_id)
+        if embed is None:
+            await interaction.response.send_message("❌ Ván này đã kết thúc hoặc không tồn tại!", ephemeral=True)
+            return
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(embed=embed, view=self)
+        await _finish_minigame(interaction, self.owner_id)
+        self.stop()
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+
+class TriviaView(discord.ui.View):
+    def __init__(self, game_id: str, owner_id: int, options: list[str]):
+        super().__init__(timeout=TRIVIA_TIMEOUT_SEC)
+        self.game_id = game_id
+        self.owner_id = owner_id
+        for i, opt in enumerate(options):
+            self.add_item(self._make_button(i, opt))
+
+    def _make_button(self, index: int, label: str) -> discord.ui.Button:
+        button = discord.ui.Button(label=label, style=discord.ButtonStyle.secondary)
+
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message("Đây không phải ván của bạn!", ephemeral=True)
+                return
+            embed = await features.process_trivia(self.game_id, index)
+            if embed is None:
+                await interaction.response.send_message("❌ Ván này đã kết thúc hoặc không tồn tại!", ephemeral=True)
+                return
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(embed=embed, view=self)
+            await _finish_minigame(interaction, self.owner_id)
+            self.stop()
+
+        button.callback = callback
+        return button
+
+    async def on_timeout(self):
+        await features.trivia_timeout(self.game_id)
+        for child in self.children:
+            child.disabled = True
+
+
 async def _finish_minigame(interaction: discord.Interaction, owner_id: int):
     """Gọi khi 1 ván minigame vừa kết thúc: cập nhật quest + kiểm tra thành tựu."""
     await _bump_quest_and_notify_ctx(interaction.channel, interaction.user, "play_game_5")
@@ -864,7 +1010,7 @@ class GameChooserView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Wordle", emoji="🟩", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Wordle", emoji="🟩", style=discord.ButtonStyle.success, row=0)
     async def btn_wordle(self, interaction: discord.Interaction, button: discord.ui.Button):
         existing_gid = features.user_active_wordle_id(self.owner_id)
         if existing_gid:
@@ -876,25 +1022,42 @@ class GameChooserView(discord.ui.View):
         gid, embed = features.start_wordle(self.owner_id)
         await interaction.response.edit_message(embed=embed, view=WordleView(gid, self.owner_id))
 
-    @discord.ui.button(label="Đoán số", emoji="🔢", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Đoán số", emoji="🔢", style=discord.ButtonStyle.primary, row=0)
     async def btn_guess_number(self, interaction: discord.Interaction, button: discord.ui.Button):
         gid, embed = features.start_guess_number(self.owner_id)
         await interaction.response.edit_message(embed=embed, view=GuessNumberView(gid, self.owner_id))
 
-    @discord.ui.button(label="Kéo Búa Bao", emoji="✊", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Kéo Búa Bao", emoji="✊", style=discord.ButtonStyle.secondary, row=0)
     async def btn_rps(self, interaction: discord.Interaction, button: discord.ui.Button):
         gid, embed = features.start_rps(self.owner_id)
         await interaction.response.edit_message(embed=embed, view=RPSView(gid, self.owner_id))
 
+    @discord.ui.button(label="Trivia (đố vui)", emoji="🧠", style=discord.ButtonStyle.primary, row=1)
+    async def btn_trivia(self, interaction: discord.Interaction, button: discord.ui.Button):
+        gid, embed, options = features.start_trivia(self.owner_id)
+        await interaction.response.edit_message(embed=embed, view=TriviaView(gid, self.owner_id, options))
+
+    @discord.ui.button(label="Tài Xỉu (cược MICK)", emoji="🎲", style=discord.ButtonStyle.danger, row=1)
+    async def btn_taixiu(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(BetAmountModal("taixiu"))
+
+    @discord.ui.button(label="Xì Dách (cược MICK)", emoji="🃏", style=discord.ButtonStyle.danger, row=1)
+    async def btn_xidach(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(BetAmountModal("xidach"))
+
 
 @tree.command(
     name="trò-chơi",
-    description="Chơi minigame: Wordle, Đoán số, hoặc Kéo Búa Bao",
+    description="Chơi minigame: Wordle, Đoán số, Kéo Búa Bao, Trivia, Tài Xỉu, Xì Dách",
 )
 async def game_cmd(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🎮 Chọn minigame",
-        description="Bấm nút bên dưới để chơi. Mỗi ván có 1 ID riêng, tra lại bằng `/tra-game`.",
+        description=(
+            "Bấm nút bên dưới để chơi. Mỗi ván có 1 ID riêng, tra lại bằng `/tra-game`.\n\n"
+            "🎲 **Tài Xỉu** và 🃏 **Xì Dách** ăn thua MICK thật (cược tự do, miễn đủ số dư) — "
+            "các game còn lại chơi miễn phí, thắng nhận thưởng cố định."
+        ),
         color=discord.Color.gold(),
     )
     await interaction.response.send_message(embed=embed, view=GameChooserView(interaction.user.id))
@@ -973,7 +1136,85 @@ async def quest_cmd(interaction: discord.Interaction):
 # ---------------------------------------------------------------------------
 
 
-@tree.command(name="chuyển-tiền", description="Chuyển MICK cho người khác (tiền càng cao xử lý càng lâu)")
+_OTP_FAIL_REASONS = {
+    "not_found": "Không tìm thấy giao dịch nào đang chờ xác minh (có thể đã hết hạn hoặc chưa từng tạo).",
+    "expired": "Mã OTP đã hết hạn. Dùng lại `/chuyển-tiền` để nhận mã mới.",
+    "wrong_code": "Mã OTP không đúng!",
+    "too_many_attempts": "Nhập sai quá số lần cho phép, giao dịch đã bị huỷ. Dùng lại `/chuyển-tiền` để thử lại.",
+}
+
+
+class TransferOtpModal(discord.ui.Modal, title="Xác minh chuyển tiền"):
+    def __init__(self, sender_id: int, receiver: discord.Member, amount: int):
+        super().__init__()
+        self.sender_id = sender_id
+        self.receiver = receiver
+        self.amount = amount
+        self.ma_otp = discord.ui.TextInput(
+            label="Nhập mã OTP đã gửi qua DM",
+            min_length=TRANSFER_OTP_LENGTH,
+            max_length=TRANSFER_OTP_LENGTH,
+            placeholder="vd: 123456",
+        )
+        self.add_item(self.ma_otp)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        verify = features.verify_transfer_otp(self.sender_id, str(self.ma_otp).strip())
+        if not verify["ok"]:
+            msg = _OTP_FAIL_REASONS.get(verify["reason"], "Xác minh thất bại.")
+            await interaction.response.send_message(f"❌ {msg}", ephemeral=True)
+            return
+
+        # OTP đúng -> giờ mới thực sự trừ/cộng tiền (atomic, có lock trong transfer_mick).
+        delay = economy.transfer_delay_seconds(self.amount)
+        await interaction.response.send_message(
+            f"✅ Xác minh thành công! Đang xử lý chuyển **{self.amount} MICK** cho {self.receiver.mention}... "
+            f"(mất khoảng **{delay:.0f} giây**, tiền càng cao xử lý càng lâu)"
+        )
+        await asyncio.sleep(delay)
+
+        result = await economy.transfer_mick(self.sender_id, self.receiver.id, self.amount)
+        if result["ok"]:
+            await interaction.followup.send(
+                f"✅ Đã chuyển **{self.amount} MICK** từ <@{self.sender_id}> đến {self.receiver.mention}!\n"
+                f"Số dư người gửi: **{result['from_balance']} MICK**"
+            )
+        else:
+            await interaction.followup.send(f"❌ Chuyển tiền thất bại ({result['reason']}). MICK chưa bị trừ.")
+
+
+class TransferOtpView(discord.ui.View):
+    def __init__(self, sender_id: int, receiver: discord.Member, amount: int):
+        super().__init__(timeout=TRANSFER_OTP_TTL_SEC)
+        self.sender_id = sender_id
+        self.receiver = receiver
+        self.amount = amount
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.sender_id:
+            await interaction.response.send_message("Đây không phải giao dịch của bạn!", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Nhập mã OTP", emoji="🔐", style=discord.ButtonStyle.primary)
+    async def btn_enter_otp(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(TransferOtpModal(self.sender_id, self.receiver, self.amount))
+
+    @discord.ui.button(label="Huỷ", emoji="✖️", style=discord.ButtonStyle.secondary)
+    async def btn_cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        features.cancel_transfer_otp(self.sender_id)
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content="✖️ Đã huỷ giao dịch.", view=self)
+        self.stop()
+
+    async def on_timeout(self):
+        features.cancel_transfer_otp(self.sender_id)
+        for child in self.children:
+            child.disabled = True
+
+
+@tree.command(name="chuyển-tiền", description="Chuyển MICK cho người khác (cần xác minh OTP qua DM, tiền càng cao xử lý càng lâu)")
 @discord.app_commands.describe(nguoi_nhan="Người nhận MICK", so_tien="Số MICK muốn chuyển")
 async def transfer_cmd(interaction: discord.Interaction, nguoi_nhan: discord.Member, so_tien: int):
     if so_tien <= 0:
@@ -990,21 +1231,26 @@ async def transfer_cmd(interaction: discord.Interaction, nguoi_nhan: discord.Mem
         )
         return
 
-    delay = economy.transfer_delay_seconds(so_tien)
-    await interaction.response.send_message(
-        f"⏳ Đang xử lý chuyển **{so_tien} MICK** cho {nguoi_nhan.mention}... "
-        f"(mất khoảng **{delay:.0f} giây**, tiền càng cao xử lý càng lâu)"
-    )
-    await asyncio.sleep(delay)
-
-    result = await economy.transfer_mick(interaction.user.id, nguoi_nhan.id, so_tien)
-    if result["ok"]:
-        await interaction.followup.send(
-            f"✅ Đã chuyển **{so_tien} MICK** từ {interaction.user.mention} đến {nguoi_nhan.mention}!\n"
-            f"Số dư người gửi: **{result['from_balance']} MICK**"
+    code = features.create_transfer_otp(interaction.user.id, nguoi_nhan.id, so_tien)
+    try:
+        await interaction.user.send(
+            f"🔐 Mã OTP xác minh chuyển **{so_tien} MICK** cho {nguoi_nhan.mention}: **{code}**\n"
+            f"Mã có hiệu lực trong **{TRANSFER_OTP_TTL_SEC} giây**. Không chia sẻ mã này cho ai."
         )
-    else:
-        await interaction.followup.send(f"❌ Chuyển tiền thất bại ({result['reason']}). MICK chưa bị trừ.")
+    except discord.Forbidden:
+        features.cancel_transfer_otp(interaction.user.id)
+        await interaction.response.send_message(
+            "❌ Không gửi được DM cho bạn! Hãy bật nhận tin nhắn riêng từ thành viên server rồi thử lại.",
+            ephemeral=True,
+        )
+        return
+
+    await interaction.response.send_message(
+        f"📨 Đã gửi mã OTP qua DM. Nhập mã trong **{TRANSFER_OTP_TTL_SEC} giây** để xác nhận chuyển "
+        f"**{so_tien} MICK** cho {nguoi_nhan.mention}.",
+        view=TransferOtpView(interaction.user.id, nguoi_nhan, so_tien),
+        ephemeral=True,
+    )
 
 
 @tree.command(name="atm", description="Gửi/rút MICK vào ATM (giữ tiền hộ, tách khỏi ví tiêu xài)")
@@ -1246,7 +1492,7 @@ _HELP_CATEGORIES = [
             ("/hồ-sơ [thành_viên]", "Hồ sơ · Level card ảnh · Rank · UUID · ngày tham gia — bấm nút để chuyển view"),
             ("/bảng-xếp-hạng [loại]", "Bảng xếp hạng Level hoặc MICK Coin"),
             ("/atm [hành_động] [số_tiền]", "Gửi/rút MICK vào ATM, hoặc xem số dư"),
-            ("/chuyển-tiền [người_nhận] [số_tiền]", "Chuyển MICK cho người khác"),
+            ("/chuyển-tiền [người_nhận] [số_tiền]", "Chuyển MICK cho người khác (cần xác minh mã OTP gửi qua DM)"),
         ],
     },
     {
@@ -1254,7 +1500,7 @@ _HELP_CATEGORIES = [
         "label": "Minigame & Quest",
         "emoji": "🎮",
         "commands": [
-            ("/trò-chơi", "Chơi Wordle · Đoán số · Kéo Búa Bao — bấm nút để chọn, nhập qua form"),
+            ("/trò-chơi", "Chơi Wordle · Đoán số · Kéo Búa Bao · Trivia · 🎲 Tài Xỉu · 🃏 Xì Dách (2 game cuối cược MICK thật)"),
             ("/tra-game [id_ván]", "Tra thông tin/trạng thái 1 ván minigame theo ID riêng"),
             ("/nhiệm-vụ", "Xem quest hằng ngày của bạn"),
             ("/thành-tựu", "Xem danh sách thành tựu"),
