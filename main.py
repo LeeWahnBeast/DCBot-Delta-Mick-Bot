@@ -5,30 +5,15 @@ Các file liên quan:
 - config.py        : đọc biến môi trường, cấu hình chung
 - tiktok_client.py  : lấy dữ liệu (avatar, video mới, live) từ TikTok
 - discord_bot.py    : Discord client + lưu trạng thái + vòng lặp kiểm tra + gửi thông báo
-- main.py (file này): ghép mọi thứ lại + web server nhỏ cho Render health-check
+- web_server.py     : dashboard web (lượt xem, đánh giá sao, CPU/RAM) + health-check
+- main.py (file này): ghép mọi thứ lại
 """
 
 import asyncio
 
-from aiohttp import web
-
-from config import DISCORD_TOKEN, DISCORD_CHANNEL_ID, PORT, log
+from config import DISCORD_TOKEN, DISCORD_CHANNEL_ID, log
 from discord_bot import client
-
-
-async def handle_health(request):
-    return web.Response(text="OK - tiktok discord bot is running")
-
-
-async def start_web_server():
-    """Web server tối giản để Render coi service là 'healthy' (cần bind PORT)."""
-    app = web.Application()
-    app.router.add_get("/", handle_health)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    log.info("Web server (health check) đang chạy ở port %s", PORT)
+from web_server import start_web_server
 
 
 async def main():
