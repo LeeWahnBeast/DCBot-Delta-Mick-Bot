@@ -56,6 +56,51 @@ CUP_GAME_CUP_COUNT = int(os.environ.get("CUP_GAME_CUP_COUNT", "3"))
 WORDLE_WIN_REWARD = int(os.environ.get("WORDLE_WIN_REWARD", "15"))
 WORDLE_MAX_GUESSES = int(os.environ.get("WORDLE_MAX_GUESSES", "6"))
 
+# --- Emoji / kênh chung ---
+MICKCOIN_EMOJI = os.environ.get("MICKCOIN_EMOJI", "<:mickcoin:0>")  # đổi id thật sau khi upload emoji
+QUEST_CHANNEL_ID = int(os.environ.get("QUEST_CHANNEL_ID", "1528590477073584138"))
+AI_CHAT_CHANNEL_ID = int(os.environ.get("AI_CHAT_CHANNEL_ID", "1528590477073584138"))
+
+# --- Chuyển MICK (transfer): tiền càng cao, thời gian xử lý càng lâu ---
+TRANSFER_SECONDS_PER_MICK = float(os.environ.get("TRANSFER_SECONDS_PER_MICK", "0.05"))  # 0.05s/1 MICK
+TRANSFER_MIN_SECONDS = float(os.environ.get("TRANSFER_MIN_SECONDS", "2"))
+TRANSFER_MAX_SECONDS = float(os.environ.get("TRANSFER_MAX_SECONDS", "600"))  # trần 10 phút
+
+# --- Thành tựu: khó <30 MICK, dễ >30 MICK (độ khó tỉ lệ NGHỊCH với thưởng) ---
+ACHIEVEMENT_HARD_REWARD_MAX = int(os.environ.get("ACHIEVEMENT_HARD_REWARD_MAX", "29"))
+ACHIEVEMENT_EASY_REWARD_MIN = int(os.environ.get("ACHIEVEMENT_EASY_REWARD_MIN", "31"))
+
+# --- Quest hằng ngày ---
+QUEST_COUNT_PER_DAY = int(os.environ.get("QUEST_COUNT_PER_DAY", "3"))
+QUEST_REWARD_MICK = int(os.environ.get("QUEST_REWARD_MICK", "20"))
+
+# --- AI Chat (Groq) ---
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+AI_AUTO_CHAT_INTERVAL_SEC = int(os.environ.get("AI_AUTO_CHAT_INTERVAL_SEC", str(30 * 60)))
+AI_LEARN_MIN_WORD_LEN = int(os.environ.get("AI_LEARN_MIN_WORD_LEN", "3"))
+
+# --- ATM: giữ tiền hộ, tách khỏi ví tiêu xài ---
+ATM_ENABLED = True
+
+# --- Minigame kinh doanh (quán / công ty / nhà trọ / khách sạn) ---
+# income mỗi 30 phút cho MỖI nhân viên đã thuê, theo loại hình
+BUSINESS_INCOME_PER_TICK = {
+    "quan": int(os.environ.get("BIZ_INCOME_QUAN", "10")),
+    "congty": int(os.environ.get("BIZ_INCOME_CONGTY", "18")),
+    "nhatro": int(os.environ.get("BIZ_INCOME_NHATRO", "14")),
+    "khachsan": int(os.environ.get("BIZ_INCOME_KHACHSAN", "25")),
+}
+BUSINESS_OPEN_COST = {
+    "quan": int(os.environ.get("BIZ_COST_QUAN", "200")),
+    "congty": int(os.environ.get("BIZ_COST_CONGTY", "500")),
+    "nhatro": int(os.environ.get("BIZ_COST_NHATRO", "350")),
+    "khachsan": int(os.environ.get("BIZ_COST_KHACHSAN", "800")),
+}
+BUSINESS_HIRE_COST = int(os.environ.get("BIZ_HIRE_COST", "100"))
+BUSINESS_MAX_STAFF = int(os.environ.get("BIZ_MAX_STAFF", "5"))
+BUSINESS_TICK_SEC = int(os.environ.get("BIZ_TICK_SEC", str(30 * 60)))  # trả lương/thu nhập mỗi 30p
+
 
 def setup_logging() -> logging.Logger:
     logging.basicConfig(
