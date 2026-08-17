@@ -10,6 +10,7 @@ import string
 
 import discord
 
+import db
 import economy
 from config import CUP_GAME_REWARD, CUP_GAME_CUP_COUNT, WORDLE_WIN_REWARD, WORDLE_MAX_GUESSES
 
@@ -57,6 +58,18 @@ class CupGameView(discord.ui.View):
         reveal = " ".join(
             CANDY_EMOJI if i == self.winning_index else "🚫" for i in range(CUP_GAME_CUP_COUNT)
         )
+
+        try:
+            import quests
+
+            finished = await quests.bump_progress(self.owner_id, "play_game_5")
+            if finished:
+                await interaction.channel.send(
+                    f"✅ <@{self.owner_id}> hoàn thành quest **{finished['desc']}**! "
+                    f"+**{finished['reward']} MICK** (số dư: {finished['new_balance']})"
+                )
+        except Exception:
+            pass
 
         if won:
             new_balance = await economy.add_mick(self.owner_id, CUP_GAME_REWARD)
@@ -169,6 +182,9 @@ async def process_guess(user_id: int, guess: str) -> tuple[discord.Embed, bool]:
 
     if won:
         new_balance = await economy.add_mick(user_id, WORDLE_WIN_REWARD)
+        user = await db.get_user(user_id)
+        wordle_wins = user.get("wordle_wins", 0) + 1
+        await db.save_user(user_id, {"wordle_wins": wordle_wins})
         embed = discord.Embed(
             title="🎉 Wordle - Thắng!",
             description=(
