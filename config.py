@@ -63,7 +63,7 @@ WORDLE_WIN_REWARD = int(os.environ.get("WORDLE_WIN_REWARD", "15"))
 WORDLE_MAX_GUESSES = int(os.environ.get("WORDLE_MAX_GUESSES", "6"))
 
 # --- Emoji / kênh chung ---
-MICKCOIN_EMOJI = os.environ.get("MICKCOIN_EMOJI", "<:mickcoin:0>")  # đổi id thật sau khi upload emoji
+MICKCOIN_EMOJI = os.environ.get("MICKCOIN_EMOJI", "<:mickcoin:1538841771935531038>")
 QUEST_CHANNEL_ID = int(os.environ.get("QUEST_CHANNEL_ID", "1528590477073584138"))
 AI_CHAT_CHANNEL_ID = int(os.environ.get("AI_CHAT_CHANNEL_ID", "1528590477073584138"))
 
@@ -82,8 +82,10 @@ QUEST_REWARD_MICK = int(os.environ.get("QUEST_REWARD_MICK", "20"))
 
 # --- AI Chat (Groq) ---
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
-AI_AUTO_CHAT_INTERVAL_SEC = int(os.environ.get("AI_AUTO_CHAT_INTERVAL_SEC", str(30 * 60)))
+GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
+AI_AUTO_CHAT_INTERVAL_SEC = int(os.environ.get("AI_AUTO_CHAT_INTERVAL_SEC", str(15 * 60)))
+# Chỉ tự nhắn nếu có người thật (không phải bot) chat trong kênh trong khoảng thời gian này
+AI_AUTO_CHAT_REQUIRE_ACTIVITY_SEC = int(os.environ.get("AI_AUTO_CHAT_REQUIRE_ACTIVITY_SEC", str(60 * 60)))
 AI_LEARN_MIN_WORD_LEN = int(os.environ.get("AI_LEARN_MIN_WORD_LEN", "3"))
 
 # --- ATM: giữ tiền hộ, tách khỏi ví tiêu xài ---
