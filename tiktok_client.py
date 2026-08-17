@@ -133,3 +133,28 @@ async def download_bytes(session: aiohttp.ClientSession, url: str) -> bytes | No
     except Exception as e:
         log.warning("Lỗi tải ảnh: %s", e)
     return None
+
+
+class TikTokClient:
+    """Wrapper giữ 1 aiohttp.ClientSession dùng chung, gọi lại 2 hàm ở trên.
+    Tự tạo session lười (lazy) ở lần gọi đầu tiên, tái sử dụng cho các lần sau."""
+
+    def __init__(self):
+        self._session: aiohttp.ClientSession | None = None
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+        return self._session
+
+    async def fetch_profile(self, username: str) -> dict | None:
+        session = await self._get_session()
+        return await fetch_tiktok_profile(session, username)
+
+    async def download_bytes(self, url: str) -> bytes | None:
+        session = await self._get_session()
+        return await download_bytes(session, url)
+
+    async def close(self):
+        if self._session and not self._session.closed:
+            await self._session.close()
