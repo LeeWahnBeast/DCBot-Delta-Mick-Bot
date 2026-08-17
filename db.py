@@ -253,7 +253,37 @@ async def get_word(word: str) -> dict:
 
 
 async def save_word(word: str, data: dict) -> None:
+    global _learned_words_cache
     await _set_doc("ai_words", word.lower(), data, merge=True)
+    _learned_words_cache = None
+
+
+_learned_words_cache: list[tuple[str, dict]] | None = None
+_learned_words_cache_ts: float = 0.0
+_LEARNED_WORDS_CACHE_TTL = 120  # giây
+
+
+async def get_learned_words(use_cache: bool = True) -> list[tuple[str, dict]]:
+    """Trả về [(word, data), ...] toàn bộ từ đã học (có nghĩa hoặc không).
+    Có cache RAM 120s vì hàm này được gọi mỗi lần bot trả lời chat (build context)."""
+    global _learned_words_cache, _learned_words_cache_ts
+    import time as _time
+
+    if use_cache and _learned_words_cache is not None and (_time.time() - _learned_words_cache_ts) < _LEARNED_WORDS_CACHE_TTL:
+        return _learned_words_cache
+
+    if _use_memory_fallback:
+        out = []
+        for key, val in _memory_store.items():
+            if key.startswith("ai_words/"):
+                out.append((key.split("/", 1)[1], dict(val)))
+    else:
+        docs = [d async for d in _client.collection("ai_words").stream()]
+        out = [(d.id, d.to_dict() or {}) for d in docs]
+
+    _learned_words_cache = out
+    _learned_words_cache_ts = _time.time()
+    return out
 
 
 async def get_site_stats() -> dict:
