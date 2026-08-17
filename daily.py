@@ -11,6 +11,7 @@ import discord
 
 import db
 import economy
+import achievements
 from config import (
     VN_UTC_OFFSET_HOURS,
     DAILY_BASE_REWARD,
@@ -95,6 +96,13 @@ async def _handle_claim(interaction: discord.Interaction):
     await interaction.response.send_message(
         f"🎁 Bạn nhận được **{reward} MICK**! (Số dư hiện tại: **{new_balance} MICK**)", ephemeral=True
     )
+
+    try:
+        unlocked = await achievements.unlock(user_id, "first_daily")
+        if unlocked and interaction.channel is not None:
+            await achievements.announce_unlocks(interaction.channel, interaction.user, [unlocked])
+    except Exception:
+        pass
 
 
 async def maybe_post_daily(client: discord.Client, channel_id: int) -> None:
