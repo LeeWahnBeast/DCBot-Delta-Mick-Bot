@@ -117,7 +117,19 @@ async def get_unnotified_video_ids(limit: int = 5) -> list[str]:
 # users: MICK, XP, level, Daily
 # ---------------------------------------------------------------------------
 
-DEFAULT_USER = {"mick": 0, "xp": 0, "level": 0, "last_xp_at": 0, "last_daily_date": ""}
+DEFAULT_USER = {
+    "mick": 0,
+    "xp": 0,
+    "level": 0,
+    "last_xp_at": 0,
+    "last_daily_date": "",
+    "atm_balance": 0,
+    "achievements": [],  # list[str] id thành tựu đã mở
+    "quest_date": "",
+    "quest_ids": [],  # 3 quest hôm nay
+    "quest_progress": {},  # {quest_id: count}
+    "quest_done": [],  # quest_id đã hoàn thành hôm nay
+}
 
 
 async def get_user(user_id: int) -> dict:
@@ -125,6 +137,18 @@ async def get_user(user_id: int) -> dict:
     merged = dict(DEFAULT_USER)
     merged.update(data)
     return merged
+
+
+async def get_all_users() -> list[tuple[str, dict]]:
+    """Trả về [(user_id_str, data), ...] toàn bộ user - dùng cho leaderboard/business tick."""
+    if _use_memory_fallback:
+        out = []
+        for key, val in _memory_store.items():
+            if key.startswith("users/"):
+                out.append((key.split("/", 1)[1], dict(val)))
+        return out
+    docs = [d async for d in _client.collection("users").stream()]
+    return [(d.id, d.to_dict() or {}) for d in docs]
 
 
 async def save_user(user_id: int, data: dict) -> None:
@@ -171,6 +195,43 @@ async def submit_rating(voter_id: str, stars: int) -> None:
         return
     ref = _client.collection("site").document("dashboard")
     await ref.set({"ratings": {voter_id: stars}}, merge=True)
+
+
+# ---------------------------------------------------------------------------
+# businesses: minigame kinh doanh (quán/công ty/nhà trọ/khách sạn)
+# ---------------------------------------------------------------------------
+
+
+async def get_business(user_id: int, kind: str) -> dict:
+    return await _get_doc("businesses", f"{user_id}_{kind}")
+
+
+async def save_business(user_id: int, kind: str, data: dict) -> None:
+    await _set_doc("businesses", f"{user_id}_{kind}", data, merge=True)
+
+
+async def get_all_businesses() -> list[tuple[str, dict]]:
+    if _use_memory_fallback:
+        out = []
+        for key, val in _memory_store.items():
+            if key.startswith("businesses/"):
+                out.append((key.split("/", 1)[1], dict(val)))
+        return out
+    docs = [d async for d in _client.collection("businesses").stream()]
+    return [(d.id, d.to_dict() or {}) for d in docs]
+
+
+# ---------------------------------------------------------------------------
+# ai_words: từ điển bot tự học được trong server (nghĩa tra trên mạng)
+# ---------------------------------------------------------------------------
+
+
+async def get_word(word: str) -> dict:
+    return await _get_doc("ai_words", word.lower())
+
+
+async def save_word(word: str, data: dict) -> None:
+    await _set_doc("ai_words", word.lower(), data, merge=True)
 
 
 async def get_site_stats() -> dict:
