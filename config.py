@@ -43,6 +43,12 @@ XP_MIN_PER_MESSAGE = int(os.environ.get("XP_MIN_PER_MESSAGE", "10"))
 XP_MAX_PER_MESSAGE = int(os.environ.get("XP_MAX_PER_MESSAGE", "20"))
 XP_MESSAGE_COOLDOWN_SEC = int(os.environ.get("XP_MESSAGE_COOLDOWN_SEC", "60"))
 
+# --- XP theo Voice Chat (chỉ tính khi không mute/deaf và có >=2 người trong kênh) ---
+VOICE_XP_TICK_SEC = int(os.environ.get("VOICE_XP_TICK_SEC", "60"))  # kiểm tra mỗi 60s
+VOICE_XP_MIN_PER_TICK = int(os.environ.get("VOICE_XP_MIN_PER_TICK", "8"))
+VOICE_XP_MAX_PER_TICK = int(os.environ.get("VOICE_XP_MAX_PER_TICK", "15"))
+VOICE_XP_MIN_MEMBERS = int(os.environ.get("VOICE_XP_MIN_MEMBERS", "2"))  # tối thiểu bao nhiêu người trong kênh mới tính XP
+
 # --- Daily (0h -> 7h sáng giờ VN, UTC+7) ---
 VN_UTC_OFFSET_HOURS = 7
 DAILY_BASE_REWARD = int(os.environ.get("DAILY_BASE_REWARD", "500"))
