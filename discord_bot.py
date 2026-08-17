@@ -1,7 +1,8 @@
 """
 Discord Client: thông báo TikTok (video/live, có retry nếu gửi lỗi), đồng bộ
 avatar bot + icon/tên server mỗi 5 tiếng, hệ thống MICK + Level (XP theo tin
-nhắn), Daily hàng ngày (0h-7h giờ VN), và 2 minigame (úp ly, wordle).
+nhắn VÀ theo voice chat), Daily hàng ngày (0h-7h giờ VN), 2 minigame (úp ly,
+wordle), thành tựu, quest hằng ngày, kinh doanh, ATM, chuyển MICK, AI chat.
 
 Toàn bộ dữ liệu bền vững (video đã báo, level/MICK, mốc Daily...) lưu ở
 Firestore qua module db.py, không còn phụ thuộc file JSON local (ổ đĩa Render
@@ -28,6 +29,10 @@ from config import (
     XP_MIN_PER_MESSAGE,
     XP_MAX_PER_MESSAGE,
     XP_MESSAGE_COOLDOWN_SEC,
+    VOICE_XP_TICK_SEC,
+    VOICE_XP_MIN_PER_TICK,
+    VOICE_XP_MAX_PER_TICK,
+    VOICE_XP_MIN_MEMBERS,
     AI_CHAT_CHANNEL_ID,
     AI_AUTO_CHAT_INTERVAL_SEC,
     BUSINESS_TICK_SEC,
@@ -49,6 +54,8 @@ import ai_chat
 
 intents = discord.Intents.default()
 intents.message_content = True  # cần để đọc nội dung tin nhắn (XP + đoán Wordle)
+intents.voice_states = True  # cần để biết ai đang trong voice channel (XP voice chat)
+intents.members = True  # cần để duyệt danh sách thành viên trong voice channel
 client = discord.Client(intents=intents)
 tree = discord.app_commands.CommandTree(client)
 
@@ -78,6 +85,8 @@ async def on_ready():
         business_tick_loop.start()
     if not ai_auto_chat_loop.is_running():
         ai_auto_chat_loop.start()
+    if not voice_xp_loop.is_running():
+        voice_xp_loop.start()
 
 
 def _mention_prefix() -> str:
@@ -332,6 +341,71 @@ async def ai_auto_chat_loop():
 @ai_auto_chat_loop.before_loop
 async def before_ai_auto_chat_loop():
     await client.wait_until_ready()
+
+
+# ---------------------------------------------------------------------------
+# Vòng lặp 6: XP theo Voice Chat - quét mọi voice channel mỗi VOICE_XP_TICK_SEC,
+# cộng XP cho ai đang không mute/deaf VÀ kênh có >= VOICE_XP_MIN_MEMBERS người
+# (tránh farm XP bằng cách tự vào voice 1 mình rồi AFK).
+# ---------------------------------------------------------------------------
+
+
+@tasks.loop(seconds=VOICE_XP_TICK_SEC)
+async def voice_xp_loop():
+    guild = client.get_guild(DISCORD_GUILD_ID)
+    if guild is None:
+        return
+
+    for voice_channel in guild.voice_channels:
+        members = [m for m in voice_channel.members if not m.bot]
+        if len(members) < VOICE_XP_MIN_MEMBERS:
+            continue  # kênh trống hoặc chỉ có 1 mình -> không tính XP
+
+        for member in members:
+            state = member.voice
+            if state is None:
+                continue
+            # Bỏ qua nếu tự mute/deaf hoặc bị server mute/deaf (coi như không "nói chuyện")
+            if state.self_mute or state.self_deaf or state.mute or state.deaf:
+                continue
+            if state.afk:
+                continue
+
+            amount = random.randint(VOICE_XP_MIN_PER_TICK, VOICE_XP_MAX_PER_TICK)
+            try:
+                result = await economy.add_xp(member.id, amount)
+            except Exception as e:
+                log.warning("Cộng XP voice cho %s lỗi: %s", member.id, e)
+                continue
+
+            if result["levels_gained"] > 0:
+                await _announce_level_up(member, result)
+
+
+@voice_xp_loop.before_loop
+async def before_voice_xp_loop():
+    await client.wait_until_ready()
+
+
+async def _announce_level_up(member: discord.Member, result: dict):
+    """Thông báo lên level (dùng chung cho XP nhắn tin lẫn XP voice chat)."""
+    channel = await _get_channel()
+    if channel is None:
+        return
+    try:
+        await channel.send(
+            f"🎉 {member.mention} đã lên **Level {result['level']}**! "
+            f"Nhận **{result['mick_awarded']} MICK**. (từ voice chat 🎙️)"
+        )
+    except Exception:
+        pass
+
+    try:
+        unlocked = await achievements.check_and_unlock_by_stats(member.id)
+        if unlocked:
+            await achievements.announce_unlocks(channel, member, unlocked)
+    except Exception as e:
+        log.warning("Kiểm tra thành tựu sau voice XP lỗi: %s", e)
 
 
 # ---------------------------------------------------------------------------
