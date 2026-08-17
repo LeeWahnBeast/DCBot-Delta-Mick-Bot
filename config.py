@@ -57,10 +57,14 @@ DAILY_MIN_REWARD = int(os.environ.get("DAILY_MIN_REWARD", "15"))
 DAILY_WINDOW_HOURS = int(os.environ.get("DAILY_WINDOW_HOURS", "7"))  # hết hạn lúc 7h sáng
 
 # --- Minigame ---
-CUP_GAME_REWARD = int(os.environ.get("CUP_GAME_REWARD", "4"))
-CUP_GAME_CUP_COUNT = int(os.environ.get("CUP_GAME_CUP_COUNT", "3"))
 WORDLE_WIN_REWARD = int(os.environ.get("WORDLE_WIN_REWARD", "15"))
 WORDLE_MAX_GUESSES = int(os.environ.get("WORDLE_MAX_GUESSES", "6"))
+GUESS_NUMBER_REWARD = int(os.environ.get("GUESS_NUMBER_REWARD", "12"))
+GUESS_NUMBER_MAX = int(os.environ.get("GUESS_NUMBER_MAX", "100"))
+GUESS_NUMBER_MAX_TRIES = int(os.environ.get("GUESS_NUMBER_MAX_TRIES", "7"))
+RPS_WIN_REWARD = int(os.environ.get("RPS_WIN_REWARD", "6"))
+# Ván minigame đã kết thúc vẫn tra được bằng ID trong khoảng thời gian này (giây)
+GAME_LOOKUP_TTL_SEC = int(os.environ.get("GAME_LOOKUP_TTL_SEC", "600"))
 
 # --- Emoji / kênh chung ---
 MICKCOIN_EMOJI = os.environ.get("MICKCOIN_EMOJI", "<:mickcoin:1538841771935531038>")

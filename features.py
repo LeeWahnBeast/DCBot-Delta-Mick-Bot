@@ -20,6 +20,8 @@ from datetime import datetime, timedelta, timezone
 
 import discord
 
+import uuid as _uuid_lib
+
 import db
 import economy
 from config import (
@@ -31,10 +33,13 @@ from config import (
     DAILY_DECAY_RATE,
     DAILY_MIN_REWARD,
     DAILY_WINDOW_HOURS,
-    CUP_GAME_REWARD,
-    CUP_GAME_CUP_COUNT,
     WORDLE_WIN_REWARD,
     WORDLE_MAX_GUESSES,
+    GUESS_NUMBER_REWARD,
+    GUESS_NUMBER_MAX,
+    GUESS_NUMBER_MAX_TRIES,
+    RPS_WIN_REWARD,
+    GAME_LOOKUP_TTL_SEC,
     BUSINESS_INCOME_PER_TICK,
     BUSINESS_OPEN_COST,
     BUSINESS_HIRE_COST,
@@ -164,7 +169,7 @@ QUEST_POOL: dict[str, dict] = {
     "meow_3": {"desc": "Nói `meow meow` 3 lần", "target": 3},
     "love_tag": {"desc": "Nói `i love @ai đó` (tag ngẫu nhiên 1 người) 1 lần", "target": 1},
     "femboy_3": {"desc": "Nói `i am femboy` 3 lần", "target": 3},
-    "play_game_5": {"desc": "Chơi minigame (cup/wordle) 5 lần", "target": 5},
+    "play_game_5": {"desc": "Chơi minigame (Wordle/Đoán số/Kéo Búa Bao) 5 lần", "target": 5},
     "level_up": {"desc": "Lên 1 level bất kỳ", "target": 1},
     "achievement_1_3": {"desc": "Hoàn thành 1-3 thành tựu bất kỳ", "target": 1},
     "ai_hoi_3": {"desc": "Nói `ai hỏi` 3 lần", "target": 3},
@@ -350,87 +355,76 @@ async def maybe_post_daily(client: discord.Client, channel_id: int) -> None:
 
 
 # ===========================================================================
-# Minigame: Úp ly chọn kẹo + Wordle (Games)
+# Minigame (Games): Wordle · Đoán số · Kéo Búa Bao
+#
+# Mỗi ván có 1 game_id riêng (uuid ngắn, tra được qua lệnh /tra-game), lưu
+# trong RAM (đủ nhanh, không cần bền qua restart vì ván chơi chỉ ngắn hạn).
+# Nhập liệu (đoán từ/số) qua Modal thay vì gõ thẳng vào kênh chat, để tránh
+# người khác lỡ gõ giùm/gõ nhầm và để nhiều ván chạy song song không đụng nhau.
 # ===========================================================================
 
-CUP_EMOJI = "🥤"
-CANDY_EMOJI = "🍬"
+GAME_TYPE_LABELS = {
+    "wordle": "🟩 Wordle",
+    "guess_number": "🔢 Đoán số",
+    "rps": "✊ Kéo Búa Bao",
+}
+
+_GAME_STATUS_LABELS = {
+    "playing": "🟡 Đang chơi",
+    "won": "🟢 Thắng",
+    "lost": "🔴 Thua",
+    "draw": "⚪ Hòa",
+}
+
+# game_id (str, 8 ký tự) -> {"type", "owner_id", "status", "created_at", ...}
+_active_games: dict[str, dict] = {}
 
 
-class CupGameView(discord.ui.View):
-    def __init__(self, owner_id: int):
-        super().__init__(timeout=30)
-        self.owner_id = owner_id
-        self.winning_index = random.randrange(CUP_GAME_CUP_COUNT)
-        self.done = False
-
-        for i in range(CUP_GAME_CUP_COUNT):
-            self.add_item(self._make_button(i))
-
-    def _make_button(self, index: int) -> discord.ui.Button:
-        button = discord.ui.Button(label=f"Ly {index + 1}", emoji=CUP_EMOJI, style=discord.ButtonStyle.secondary)
-
-        async def callback(interaction: discord.Interaction):
-            await self._on_pick(interaction, index)
-
-        button.callback = callback
-        return button
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.owner_id:
-            await interaction.response.send_message("Đây không phải lượt chơi của bạn!", ephemeral=True)
-            return False
-        return True
-
-    async def _on_pick(self, interaction: discord.Interaction, index: int):
-        if self.done:
-            return
-        self.done = True
-        for child in self.children:
-            child.disabled = True
-
-        won = index == self.winning_index
-        reveal = " ".join(
-            CANDY_EMOJI if i == self.winning_index else "🚫" for i in range(CUP_GAME_CUP_COUNT)
-        )
-
-        try:
-            finished = await bump_progress(self.owner_id, "play_game_5")
-            if finished:
-                await interaction.channel.send(
-                    f"✅ <@{self.owner_id}> hoàn thành quest **{finished['desc']}**! "
-                    f"+**{finished['reward']} MICK** (số dư: {finished['new_balance']})"
-                )
-        except Exception:
-            pass
-
-        if won:
-            new_balance = await economy.add_mick(self.owner_id, CUP_GAME_REWARD)
-            desc = (
-                f"{CANDY_EMOJI} Chính xác! Bạn nhận được **{CUP_GAME_REWARD} MICK**.\n"
-                f"Số dư hiện tại: **{new_balance} MICK**."
-            )
-            color = discord.Color.green()
-        else:
-            desc = f"Tiếc quá, ly có kẹo là **Ly {self.winning_index + 1}**. Chúc may mắn lần sau!"
-            color = discord.Color.red()
-
-        embed = discord.Embed(title="🥤 Úp ly chọn kẹo - Kết quả", description=f"{reveal}\n\n{desc}", color=color)
-        await interaction.response.edit_message(embed=embed, view=self)
-        self.stop()
-
-    async def on_timeout(self):
-        for child in self.children:
-            child.disabled = True
+def _new_game_id() -> str:
+    gid = _uuid_lib.uuid4().hex[:8]
+    while gid in _active_games:
+        gid = _uuid_lib.uuid4().hex[:8]
+    return gid
 
 
-def build_cup_game_embed() -> discord.Embed:
-    return discord.Embed(
-        title="🥤 Úp ly chọn kẹo",
-        description=f"Có {CUP_GAME_CUP_COUNT} ly, 1 ly giấu {CANDY_EMOJI}. Chọn đúng nhận **{CUP_GAME_REWARD} MICK**!",
-        color=discord.Color.gold(),
-    )
+def _gc_games() -> None:
+    """Dọn RAM: xoá ván đã kết thúc quá GAME_LOOKUP_TTL_SEC (tránh rò rỉ bộ nhớ)."""
+    now = time.time()
+    stale = [
+        gid
+        for gid, g in _active_games.items()
+        if g.get("status") != "playing" and now - g.get("finished_at", now) > GAME_LOOKUP_TTL_SEC
+    ]
+    for gid in stale:
+        _active_games.pop(gid, None)
 
+
+def lookup_game(game_id: str) -> discord.Embed | None:
+    """Tra thông tin 1 ván theo ID - chỉ đọc, dùng cho lệnh /tra-game."""
+    _gc_games()
+    game = _active_games.get(game_id.strip().lower())
+    if not game:
+        return None
+
+    embed = discord.Embed(title=f"🔎 Tra ván #{game_id}", color=discord.Color.blurple())
+    embed.add_field(name="Loại game", value=GAME_TYPE_LABELS.get(game["type"], game["type"]), inline=True)
+    embed.add_field(name="Người chơi", value=f"<@{game['owner_id']}>", inline=True)
+    embed.add_field(name="Trạng thái", value=_GAME_STATUS_LABELS.get(game.get("status"), "?"), inline=True)
+    if game.get("summary"):
+        embed.add_field(name="Chi tiết", value=game["summary"], inline=False)
+    embed.set_footer(text=f"ID ván: {game_id}")
+    return embed
+
+
+def user_active_wordle_id(user_id: int) -> str | None:
+    """Trả về game_id ván Wordle đang chơi dở của user (nếu có), để chặn mở ván 2."""
+    for gid, g in _active_games.items():
+        if g["type"] == "wordle" and g["owner_id"] == user_id and g["status"] == "playing":
+            return gid
+    return None
+
+
+# --- Wordle ---------------------------------------------------------------
 
 _WORDLE_WORDS = [
     "apple", "table", "chair", "house", "mouse", "plane", "train", "brick", "cloud", "storm",
@@ -442,13 +436,6 @@ _WORDLE_WORDS = [
     "amber", "olive", "lemon", "mango", "peach", "melon", "berry", "robot", "laser", "pixel",
     "cyber", "space", "earth", "venus",
 ]
-
-# user_id -> {"answer": str, "guesses": [str], "feedback": [str]}
-_active_games: dict[int, dict] = {}
-
-
-def has_active_wordle(user_id: int) -> bool:
-    return user_id in _active_games
 
 
 def _feedback_row(answer: str, guess: str) -> str:
@@ -476,31 +463,45 @@ def _render_board(game: dict) -> str:
     for guess, fb in zip(game["guesses"], game["feedback"]):
         lines.append(f"{fb}   `{guess.upper()}`")
     remaining = WORDLE_MAX_GUESSES - len(game["guesses"])
-    lines.append(f"\nCòn **{remaining}** lượt đoán. Gõ thẳng 1 từ 5 chữ vào kênh để đoán.")
-    return "\n".join(lines) if game["guesses"] else "Gõ thẳng 1 từ tiếng Anh 5 chữ vào kênh để bắt đầu đoán!"
+    lines.append(f"\nCòn **{remaining}** lượt đoán. Bấm nút \"Nhập từ\" bên dưới để đoán.")
+    return "\n".join(lines) if game["guesses"] else "Bấm nút \"Nhập từ\" bên dưới để bắt đầu đoán 1 từ tiếng Anh 5 chữ!"
 
 
-def start_wordle(user_id: int) -> discord.Embed:
+def start_wordle(user_id: int) -> tuple[str, discord.Embed]:
+    gid = _new_game_id()
     answer = random.choice(_WORDLE_WORDS)
-    _active_games[user_id] = {"answer": answer, "guesses": [], "feedback": []}
+    _active_games[gid] = {
+        "type": "wordle",
+        "owner_id": user_id,
+        "status": "playing",
+        "created_at": time.time(),
+        "answer": answer,
+        "guesses": [],
+        "feedback": [],
+    }
     embed = discord.Embed(
-        title="🟩 Wordle",
-        description=_render_board(_active_games[user_id]),
+        title=f"🟩 Wordle · #{gid}",
+        description=_render_board(_active_games[gid]),
         color=discord.Color.blurple(),
     )
     embed.set_footer(text=f"Đoán đúng nhận {WORDLE_WIN_REWARD} MICK · Tối đa {WORDLE_MAX_GUESSES} lượt")
-    return embed
+    return gid, embed
 
 
 def is_valid_guess(text: str) -> bool:
     return len(text) == 5 and all(c in string.ascii_letters for c in text)
 
 
-async def process_guess(user_id: int, guess: str) -> tuple[discord.Embed, bool]:
-    """Trả về (embed, finished). finished=True nghĩa là ván đã kết thúc (thắng/thua)."""
-    game = _active_games[user_id]
+async def process_wordle_guess(game_id: str, guess: str) -> tuple[discord.Embed, bool] | None:
+    """Trả về (embed, finished) hoặc None nếu ván không tồn tại/đã kết thúc.
+    finished=True nghĩa là ván đã kết thúc (thắng/thua) - ván vẫn tra được qua ID sau đó."""
+    game = _active_games.get(game_id)
+    if not game or game["type"] != "wordle" or game["status"] != "playing":
+        return None
+
     guess = guess.lower()
     answer = game["answer"]
+    user_id = game["owner_id"]
 
     fb = _feedback_row(answer, guess)
     game["guesses"].append(guess)
@@ -515,7 +516,7 @@ async def process_guess(user_id: int, guess: str) -> tuple[discord.Embed, bool]:
         wordle_wins = user.get("wordle_wins", 0) + 1
         await db.save_user(user_id, {"wordle_wins": wordle_wins})
         embed = discord.Embed(
-            title="🎉 Wordle - Thắng!",
+            title=f"🎉 Wordle - Thắng! · #{game_id}",
             description=(
                 f"{_render_board(game)}\n\n"
                 f"Chính xác là **{answer.upper()}**! Bạn nhận **{WORDLE_WIN_REWARD} MICK**.\n"
@@ -523,21 +524,148 @@ async def process_guess(user_id: int, guess: str) -> tuple[discord.Embed, bool]:
             ),
             color=discord.Color.green(),
         )
-        del _active_games[user_id]
+        game["status"] = "won"
+        game["finished_at"] = time.time()
+        game["summary"] = f"Thắng sau {len(game['guesses'])} lượt · từ đúng **{answer.upper()}**"
         return embed, True
 
     if out_of_tries:
         embed = discord.Embed(
-            title="💀 Wordle - Hết lượt",
+            title=f"💀 Wordle - Hết lượt · #{game_id}",
             description=f"{_render_board(game)}\n\nTừ đúng là **{answer.upper()}**. Chúc may mắn lần sau!",
             color=discord.Color.red(),
         )
-        del _active_games[user_id]
+        game["status"] = "lost"
+        game["finished_at"] = time.time()
+        game["summary"] = f"Thua · từ đúng **{answer.upper()}**"
         return embed, True
 
-    embed = discord.Embed(title="🟩 Wordle", description=_render_board(game), color=discord.Color.blurple())
+    embed = discord.Embed(title=f"🟩 Wordle · #{game_id}", description=_render_board(game), color=discord.Color.blurple())
     embed.set_footer(text=f"Đoán đúng nhận {WORDLE_WIN_REWARD} MICK · Tối đa {WORDLE_MAX_GUESSES} lượt")
     return embed, False
+
+
+# --- Đoán số ----------------------------------------------------------------
+
+
+def start_guess_number(user_id: int) -> tuple[str, discord.Embed]:
+    gid = _new_game_id()
+    secret = random.randint(1, GUESS_NUMBER_MAX)
+    _active_games[gid] = {
+        "type": "guess_number",
+        "owner_id": user_id,
+        "status": "playing",
+        "created_at": time.time(),
+        "secret": secret,
+        "tries": 0,
+        "history": [],
+    }
+    return gid, _guess_number_embed(gid, _active_games[gid])
+
+
+def _guess_number_embed(gid: str, game: dict) -> discord.Embed:
+    remaining = GUESS_NUMBER_MAX_TRIES - game["tries"]
+    lines = [f"`{g}` → {hint}" for g, hint in game["history"]]
+    desc = "\n".join(lines) if lines else "Chưa đoán lần nào."
+    embed = discord.Embed(
+        title=f"🔢 Đoán số (1-{GUESS_NUMBER_MAX}) · #{gid}",
+        description=f"{desc}\n\nCòn **{remaining}** lượt đoán. Bấm nút \"Nhập số\" bên dưới.",
+        color=discord.Color.blurple(),
+    )
+    embed.set_footer(text=f"Đoán đúng nhận {GUESS_NUMBER_REWARD} MICK · Tối đa {GUESS_NUMBER_MAX_TRIES} lượt")
+    return embed
+
+
+async def process_guess_number(game_id: str, guess: int) -> tuple[discord.Embed, bool] | None:
+    game = _active_games.get(game_id)
+    if not game or game["type"] != "guess_number" or game["status"] != "playing":
+        return None
+
+    secret = game["secret"]
+    user_id = game["owner_id"]
+    game["tries"] += 1
+
+    if guess == secret:
+        new_balance = await economy.add_mick(user_id, GUESS_NUMBER_REWARD)
+        game["history"].append((guess, "🎯 Chính xác!"))
+        game["status"] = "won"
+        game["finished_at"] = time.time()
+        game["summary"] = f"Đoán đúng số **{secret}** sau {game['tries']} lượt"
+        embed = discord.Embed(
+            title=f"🎉 Đoán số - Thắng! · #{game_id}",
+            description=(
+                f"Số bí mật là **{secret}**! Bạn nhận **{GUESS_NUMBER_REWARD} MICK**.\n"
+                f"Số dư hiện tại: **{new_balance} MICK**."
+            ),
+            color=discord.Color.green(),
+        )
+        return embed, True
+
+    hint = "⬆️ Lớn hơn số này" if guess < secret else "⬇️ Nhỏ hơn số này"
+    game["history"].append((guess, hint))
+
+    if game["tries"] >= GUESS_NUMBER_MAX_TRIES:
+        game["status"] = "lost"
+        game["finished_at"] = time.time()
+        game["summary"] = f"Hết lượt · số đúng là **{secret}**"
+        embed = discord.Embed(
+            title=f"💀 Đoán số - Hết lượt · #{game_id}",
+            description=f"Số bí mật là **{secret}**. Chúc may mắn lần sau!",
+            color=discord.Color.red(),
+        )
+        return embed, True
+
+    embed = _guess_number_embed(game_id, game)
+    return embed, False
+
+
+# --- Kéo Búa Bao --------------------------------------------------------------
+
+RPS_CHOICE_LABELS = {"keo": "✂️ Kéo", "bua": "🪨 Búa", "bao": "📄 Bao"}
+_RPS_BEATS = {"keo": "bao", "bua": "keo", "bao": "bua"}  # key thắng value
+
+
+def start_rps(user_id: int) -> tuple[str, discord.Embed]:
+    gid = _new_game_id()
+    _active_games[gid] = {"type": "rps", "owner_id": user_id, "status": "playing", "created_at": time.time()}
+    embed = discord.Embed(
+        title=f"✊ Kéo Búa Bao · #{gid}",
+        description="Chọn 1 trong 3 bên dưới để đấu với bot!",
+        color=discord.Color.gold(),
+    )
+    embed.set_footer(text=f"Thắng nhận {RPS_WIN_REWARD} MICK")
+    return gid, embed
+
+
+async def process_rps(game_id: str, player_choice: str) -> discord.Embed | None:
+    game = _active_games.get(game_id)
+    if not game or game["type"] != "rps" or game["status"] != "playing":
+        return None
+
+    bot_choice = random.choice(list(RPS_CHOICE_LABELS.keys()))
+    user_id = game["owner_id"]
+
+    if player_choice == bot_choice:
+        result_text, color, status = "🤝 Hòa! Không ai nhận MICK.", discord.Color.greyple(), "draw"
+    elif _RPS_BEATS[player_choice] == bot_choice:
+        new_balance = await economy.add_mick(user_id, RPS_WIN_REWARD)
+        result_text = f"🎉 Bạn thắng! Nhận **{RPS_WIN_REWARD} MICK** (số dư: {new_balance})"
+        color, status = discord.Color.green(), "won"
+    else:
+        result_text, color, status = "😵 Bạn thua! Chúc may mắn lần sau.", discord.Color.red(), "lost"
+
+    game["status"] = status
+    game["finished_at"] = time.time()
+    game["summary"] = f"Bạn: {RPS_CHOICE_LABELS[player_choice]} · Bot: {RPS_CHOICE_LABELS[bot_choice]} → {result_text}"
+
+    embed = discord.Embed(
+        title=f"✊ Kéo Búa Bao - Kết quả · #{game_id}",
+        description=(
+            f"Bạn chọn: {RPS_CHOICE_LABELS[player_choice]}\nBot chọn: {RPS_CHOICE_LABELS[bot_choice]}\n\n{result_text}"
+        ),
+        color=color,
+    )
+    return embed
 
 
 # ===========================================================================

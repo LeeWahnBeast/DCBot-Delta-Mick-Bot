@@ -72,7 +72,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
       <div class="rating-info" id="rating-info">Đang tải đánh giá...</div>
     </div>
 
-    <div class="footer">Cập nhật mỗi 4 giây</div>
+    <div class="footer">Cập nhật mỗi 15 giây</div>
   </div>
 
 <script>
@@ -111,7 +111,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   });
 
   refreshStats();
-  setInterval(refreshStats, 4000);
+  setInterval(refreshStats, 15000);
 </script>
 </body>
 </html>"""

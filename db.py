@@ -15,6 +15,7 @@ lớp fallback lưu tạm trong RAM, để không bị crash khi test ở máy l
 import json
 import os
 import tempfile
+import uuid as _uuid_lib
 
 from config import FIREBASE_CREDENTIALS_JSON, FIRESTORE_PROJECT_ID, log
 
@@ -129,6 +130,7 @@ DEFAULT_USER = {
     "quest_ids": [],  # 3 quest hôm nay
     "quest_progress": {},  # {quest_id: count}
     "quest_done": [],  # quest_id đã hoàn thành hôm nay
+    "uuid": "",  # UUID riêng, cấp 1 lần duy nhất khi user xuất hiện lần đầu
 }
 
 
@@ -136,6 +138,14 @@ async def get_user(user_id: int) -> dict:
     data = await _get_doc("users", str(user_id))
     merged = dict(DEFAULT_USER)
     merged.update(data)
+
+    if not merged.get("uuid"):
+        # Cấp UUID riêng cho thành viên ngay lần đầu tra dữ liệu (lazy-init,
+        # không cần script migrate riêng). Chỉ ghi 1 lần vì lần sau đã có uuid.
+        new_uuid = str(_uuid_lib.uuid4())
+        merged["uuid"] = new_uuid
+        await save_user(user_id, {"uuid": new_uuid})
+
     return merged
 
 
@@ -145,10 +155,10 @@ _ALL_USERS_CACHE_TTL = 60  # giây
 
 
 async def get_all_users(use_cache: bool = True) -> list[tuple[str, dict]]:
-    """Trả về [(user_id_str, data), ...] toàn bộ user - dùng cho leaderboard/business tick.
+    """Trả về [(user_id_str, data), ...] toàn bộ user - dùng cho bảng xếp hạng/business tick.
 
     Có cache RAM 60s (use_cache=True) để tránh đọc lại toàn bộ collection Firestore
-    mỗi lần user gọi /rank hoặc /leaderboard (đỡ tốn quota + nhanh hơn trên free tier).
+    mỗi lần user gọi `/hồ-sơ` hoặc `/bảng-xếp-hạng` (đỡ tốn quota + nhanh hơn trên free tier).
     Khi save_user() được gọi, cache sẽ tự invalidate.
     """
     global _all_users_cache, _all_users_cache_ts
@@ -210,13 +220,15 @@ async def increment_views() -> int:
 
 
 async def submit_rating(voter_id: str, stars: int) -> None:
+    global _site_stats_cache
     stars = max(1, min(5, int(stars)))
     if _use_memory_fallback:
         doc = _memory_store.setdefault("site/dashboard", {"views": 0, "ratings": {}})
         doc.setdefault("ratings", {})[voter_id] = stars
-        return
-    ref = _client.collection("site").document("dashboard")
-    await ref.set({"ratings": {voter_id: stars}}, merge=True)
+    else:
+        ref = _client.collection("site").document("dashboard")
+        await ref.set({"ratings": {voter_id: stars}}, merge=True)
+    _site_stats_cache = None  # invalidate để user thấy điểm mới ngay sau khi vote
 
 
 # ---------------------------------------------------------------------------
@@ -286,8 +298,20 @@ async def get_learned_words(use_cache: bool = True) -> list[tuple[str, dict]]:
     return out
 
 
+_site_stats_cache: dict | None = None
+_site_stats_cache_ts: float = 0.0
+_SITE_STATS_CACHE_TTL = 5  # giây - dashboard poll liên tục, cache để đỡ tốn CPU/quota Firestore
+
+
 async def get_site_stats() -> dict:
-    """Trả về {views, rating_count, rating_avg}."""
+    """Trả về {views, rating_count, rating_avg}. Có cache RAM ngắn (5s) vì
+    dashboard web gọi API này định kỳ - tránh đọc Firestore mỗi request."""
+    global _site_stats_cache, _site_stats_cache_ts
+    import time as _time
+
+    if _site_stats_cache is not None and (_time.time() - _site_stats_cache_ts) < _SITE_STATS_CACHE_TTL:
+        return _site_stats_cache
+
     if _use_memory_fallback:
         doc = _memory_store.get("site/dashboard", {"views": 0, "ratings": {}})
     else:
@@ -297,4 +321,8 @@ async def get_site_stats() -> dict:
     ratings = doc.get("ratings", {}) or {}
     count = len(ratings)
     avg = round(sum(ratings.values()) / count, 2) if count else 0.0
-    return {"views": doc.get("views", 0), "rating_count": count, "rating_avg": avg}
+    result = {"views": doc.get("views", 0), "rating_count": count, "rating_avg": avg}
+
+    _site_stats_cache = result
+    _site_stats_cache_ts = _time.time()
+    return result

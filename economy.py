@@ -53,6 +53,7 @@ async def get_profile(user_id: int) -> dict:
         "level": user["level"],
         "xp": user["xp"],
         "xp_needed": needed,
+        "uuid": user.get("uuid", ""),
     }
 
 

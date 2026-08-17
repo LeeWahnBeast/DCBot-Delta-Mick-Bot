@@ -4,16 +4,11 @@ AI Chat dùng Groq API.
 - Người dùng reply vào tin nhắn của bot, hoặc @tag bot -> bot trả lời bằng Groq.
 - Bot tự nhắn 1 câu vào AI_CHAT_CHANNEL_ID mỗi AI_AUTO_CHAT_INTERVAL_SEC (30p).
 - "Học từ": khi có từ lạ (không phải từ tiếng Anh/Việt phổ thông đơn giản) xuất
-  hiện trong chat, bot lưu tần suất vào Firestore (ai_words). Định kỳ (hoặc khi
-  đủ ngưỡng), bot tra nghĩa từ đó qua web_search-kiểu (ở đây dùng chính Groq
-  làm "tra cứu" vì bot không có tool web_search riêng) rồi lưu nghĩa vào DB,
-  dùng làm ngữ cảnh cho các câu trả lời sau (bot "hiểu" tiếng lóng của server).
-
-Lưu ý: đây là bot Discord chạy độc lập (không phải Claude), nên "tra trên
-mạng" được hiện thực bằng cách nhờ chính Groq tổng hợp nghĩa/ngữ cảnh của từ
-lóng - vì bot không có quyền truy cập công cụ search riêng. Nếu muốn search
-thật (Google/Bing API), cần thêm SERPAPI_KEY hoặc tương tự và nối vào
-_lookup_meaning_online().
+  hiện trong chat, bot chỉ lưu tần suất vào Firestore (ai_words) - KHÔNG còn tự
+  gọi AI để tra nghĩa nữa (đã bỏ tính năng "tra từ qua AI" để giảm số lần gọi
+  Groq mỗi tin nhắn -> giảm CPU/độ trễ nền). Muốn bot biết nghĩa 1 từ/cụm từ,
+  member chủ động dạy qua nút "Dạy từ" ở lệnh `/từ-điển` (nhập qua Modal, rõ
+  ràng, không cần đoán ý AI).
 """
 
 import json
@@ -127,20 +122,18 @@ async def generate_auto_message() -> str | None:
 
 
 async def learn_from_message(content: str) -> None:
+    """Ghi nhận tần suất từ lạ xuất hiện trong chat. KHÔNG tự gọi AI tra nghĩa
+    (đã bỏ để giảm số lần gọi Groq mỗi tin nhắn -> giảm CPU/độ trễ nền); nghĩa
+    của từ chỉ được lưu khi member chủ động dạy qua `/từ-điển` (xem teach_word)."""
     words = {w.lower() for w in _WORD_RE.findall(content) if len(w) >= AI_LEARN_MIN_WORD_LEN}
     words -= _STOPWORDS
+    if not words:
+        return
 
     for word in words:
         existing = await db.get_word(word)
         count = existing.get("count", 0) + 1
-        update = {"count": count, "last_seen": int(time.time())}
-        await db.save_word(word, update)
-
-        # Chưa có nghĩa và đã gặp đủ nhiều lần -> tự tra nghĩa qua Groq
-        if not existing.get("meaning") and count >= 3:
-            meaning = await _lookup_meaning_online(word)
-            if meaning:
-                await db.save_word(word, {"meaning": meaning, "source": "auto"})
+        await db.save_word(word, {"count": count, "last_seen": int(time.time())})
 
 
 async def teach_word(word: str, meaning: str) -> dict:
@@ -161,25 +154,6 @@ async def teach_word(word: str, meaning: str) -> dict:
 
     await db.save_word(word, {"meaning": meaning, "source": "taught", "last_seen": int(time.time())})
     return {"ok": True}
-
-
-async def _lookup_meaning_online(word: str) -> str | None:
-    """Nhờ Groq tổng hợp nghĩa/ngữ cảnh của từ (tiếng lóng gen Z, viết tắt...)."""
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "Bạn là từ điển tiếng lóng Gen Z Việt Nam. Trả lời NGẮN GỌN "
-                "(1 câu, dưới 20 từ) nghĩa của từ/cụm từ được hỏi, nếu không "
-                "chắc thì trả lời 'không rõ nghĩa'."
-            ),
-        },
-        {"role": "user", "content": f'Từ/cụm từ: "{word}" nghĩa là gì?'},
-    ]
-    result = await _groq_chat(messages)
-    if result and "không rõ nghĩa" not in result.lower():
-        return result
-    return None
 
 
 async def _build_slang_context(limit: int = 12) -> str:
