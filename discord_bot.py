@@ -35,7 +35,9 @@ from config import (
     VOICE_XP_MIN_MEMBERS,
     AI_CHAT_CHANNEL_ID,
     AI_AUTO_CHAT_INTERVAL_SEC,
+    AI_AUTO_CHAT_REQUIRE_ACTIVITY_SEC,
     BUSINESS_TICK_SEC,
+    MICKCOIN_EMOJI,
     log,
 )
 from tiktok_client import TikTokClient
@@ -326,16 +328,36 @@ async def before_business_tick_loop():
 
 @tasks.loop(seconds=AI_AUTO_CHAT_INTERVAL_SEC)
 async def ai_auto_chat_loop():
-    text = await ai_chat.generate_auto_message()
-    if not text:
-        return
     channel = await _get_channel(AI_CHAT_CHANNEL_ID)
     if channel is None:
+        return
+
+    if not await _has_recent_human_activity(channel):
+        return  # kênh vắng người thật trong 1 tiếng qua -> bot không tự nhắn
+
+    text = await ai_chat.generate_auto_message()
+    if not text:
         return
     try:
         await channel.send(text)
     except Exception as e:
         log.warning("Gửi AI auto chat lỗi: %s", e)
+
+
+async def _has_recent_human_activity(channel) -> bool:
+    """Kiểm tra có tin nhắn của người thật (không phải bot) trong
+    AI_AUTO_CHAT_REQUIRE_ACTIVITY_SEC giây gần nhất trong kênh hay không."""
+    cutoff = datetime.now(timezone.utc).timestamp() - AI_AUTO_CHAT_REQUIRE_ACTIVITY_SEC
+    try:
+        async for msg in channel.history(limit=30):
+            if msg.created_at.timestamp() < cutoff:
+                break  # đã lùi quá xa mốc thời gian cần check -> dừng sớm
+            if not msg.author.bot:
+                return True
+        return False
+    except Exception as e:
+        log.warning("Kiểm tra hoạt động kênh lỗi: %s", e)
+        return False  # lỗi -> an toàn là không tự nhắn
 
 
 @ai_auto_chat_loop.before_loop
@@ -576,6 +598,42 @@ async def wordle_cmd(interaction: discord.Interaction):
 
 
 # ---------------------------------------------------------------------------
+# Slash commands: Rank (xem level/xp/hạng của bản thân)
+# ---------------------------------------------------------------------------
+
+
+def _progress_bar(current: int, needed: int, length: int = 12) -> str:
+    filled = int(length * current / needed) if needed else 0
+    filled = max(0, min(length, filled))
+    return "█" * filled + "░" * (length - filled)
+
+
+@tree.command(name="rank", description="Xem level, XP và hạng của bạn (hoặc người khác)")
+@discord.app_commands.describe(thanh_vien="Xem rank của người khác (bỏ trống để xem của bạn)")
+async def rank_cmd(interaction: discord.Interaction, thanh_vien: discord.Member = None):
+    await interaction.response.defer()
+    target = thanh_vien or interaction.user
+
+    profile = await economy.get_profile(target.id)
+    users = await db.get_all_users()
+    users.sort(key=lambda u: (u[1].get("level", 0), u[1].get("xp", 0)), reverse=True)
+    position = next((i for i, (uid, _) in enumerate(users, start=1) if uid == str(target.id)), len(users) + 1)
+
+    bar = _progress_bar(profile["xp"], profile["xp_needed"])
+    embed = discord.Embed(title=f"📊 Rank của {target.display_name}", color=discord.Color.blurple())
+    embed.add_field(name="Hạng", value=f"#{position}/{len(users)}", inline=True)
+    embed.add_field(name="Level", value=str(profile["level"]), inline=True)
+    embed.add_field(name="MICK", value=f"{MICKCOIN_EMOJI} {profile['mick']}", inline=True)
+    embed.add_field(
+        name="XP",
+        value=f"{bar}\n{profile['xp']}/{profile['xp_needed']}",
+        inline=False,
+    )
+    embed.set_thumbnail(url=target.display_avatar.url)
+    await interaction.followup.send(embed=embed)
+
+
+# ---------------------------------------------------------------------------
 # Slash commands: Leaderboard
 # ---------------------------------------------------------------------------
 
@@ -603,9 +661,9 @@ async def leaderboard_cmd(interaction: discord.Interaction, loai: discord.app_co
         name = member.display_name if member else f"User {uid}"
         medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"{i}.")
         if sort_key == "level":
-            lines.append(f"{medal} **{name}** — Level {data.get('level', 0)} ({data.get('mick', 0)} MICK)")
+            lines.append(f"{medal} **{name}** — Level {data.get('level', 0)} ({MICKCOIN_EMOJI} {data.get('mick', 0)})")
         else:
-            lines.append(f"{medal} **{name}** — {data.get('mick', 0)} MICK (Level {data.get('level', 0)})")
+            lines.append(f"{medal} **{name}** — {MICKCOIN_EMOJI} {data.get('mick', 0)} (Level {data.get('level', 0)})")
 
     title = "🏆 Xếp hạng Level" if sort_key == "level" else "🏆 Xếp hạng MICK Coin"
     embed = discord.Embed(title=title, description="\n".join(lines) or "Chưa có dữ liệu", color=discord.Color.orange())
