@@ -1,7 +1,7 @@
 """
 Discord Client: thông báo TikTok (video/live, có retry nếu gửi lỗi), đồng bộ
 avatar bot + icon/tên server mỗi 5 tiếng, hệ thống MICK + Level (XP theo tin
-nhắn VÀ theo voice chat), Daily hàng ngày (0h-7h giờ VN), 3 minigame có ID
+nhắn VÀ theo voice chat), Daily hàng ngày (0h-12h trưa giờ VN, có chuỗi + câu hỏi phụ), 3 minigame có ID
 riêng và nhập liệu qua Modal (Wordle, Đoán số, Kéo Búa Bao), thành tựu, quest
 hằng ngày, kinh doanh, ATM, chuyển MICK, AI chat. Tên lệnh slash đăng ký bằng
 tiếng Anh (yêu cầu kỹ thuật của Discord), mô tả/nội dung hiển thị bằng tiếng
@@ -78,6 +78,13 @@ tree = discord.app_commands.CommandTree(client)
 
 tiktok = TikTokClient()
 _last_xp_ts: dict[int, float] = {}
+
+# Đánh dấu user "có online/nhắn tin hôm nay" (giờ VN) - dùng để chốt chuỗi
+# Daily (xem features.finalize_daily_streaks): phân biệt "quên điểm danh"
+# (bị reset chuỗi) với "cả ngày không online" (giữ nguyên chuỗi). Chỉ ghi
+# DB 1 lần/user/ngày (set RAM, tự xoá khi sang ngày mới) để đỡ tốn ghi Firebase.
+_active_today: set[int] = set()
+_active_today_date: str = ""
 _synced = False
 
 
@@ -172,10 +179,17 @@ async def check_tiktok_loop():
     await _handle_live_status(profile, channel)
 
 
-def _video_embed(video_id: str, profile: dict | None, is_retry: bool) -> discord.Embed:
+def _video_embed(video_id: str, profile: dict | None, is_retry: bool, create_time: int | None = None) -> discord.Embed:
     video_url = f"https://www.tiktok.com/@{TIKTOK_USERNAME}/video/{video_id}"
     nickname = profile["nickname"] if profile else TIKTOK_USERNAME
     title = f"🎬 {nickname} vừa đăng video TikTok mới!" if not is_retry else f"🎬 Video từ {nickname} (gửi lại)"
+
+    now_ts = int(time.time())
+    # create_time có thể tới từ profile (lần đầu phát hiện) hoặc được truyền
+    # sẵn (khi retry, lúc đó profile=None nên phải lấy từ DB - xem
+    # _retry_unnotified_videos bên dưới).
+    posted_ts = create_time if create_time is not None else (profile.get("latest_video_create_time") if profile else None)
+
     embed = discord.Embed(
         title=title,
         url=video_url,
@@ -185,7 +199,41 @@ def _video_embed(video_id: str, profile: dict | None, is_retry: bool) -> discord
     )
     if profile and profile.get("avatar_url"):
         embed.set_thumbnail(url=profile["avatar_url"])
+
+    if posted_ts:
+        delay_sec = max(0, now_ts - posted_ts)
+        embed.add_field(
+            name="🕒 Đăng lúc",
+            value=f"<t:{posted_ts}:F> (<t:{posted_ts}:R>)",
+            inline=False,
+        )
+        embed.add_field(
+            name="📥 Bot phát hiện lúc",
+            value=f"<t:{now_ts}:F> (<t:{now_ts}:R>) · trễ ~{_format_delay(delay_sec)}",
+            inline=False,
+        )
+    else:
+        embed.add_field(
+            name="📥 Bot phát hiện lúc",
+            value=f"<t:{now_ts}:F> (<t:{now_ts}:R>)",
+            inline=False,
+        )
     return embed
+
+
+def _format_delay(seconds: int) -> str:
+    """Định dạng số giây trễ thành chuỗi dễ đọc (vd. '3 phút 12 giây')."""
+    seconds = max(0, int(seconds))
+    hours, rem = divmod(seconds, 3600)
+    minutes, secs = divmod(rem, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours} giờ")
+    if minutes:
+        parts.append(f"{minutes} phút")
+    if not hours and (secs or not minutes):
+        parts.append(f"{secs} giây")
+    return " ".join(parts)
 
 
 async def _handle_new_video(profile: dict, channel):
@@ -223,7 +271,7 @@ async def _handle_new_video(profile: dict, channel):
     try:
         await channel.send(
             content=f"{_mention_prefix()}📢 Có video mới từ @{TIKTOK_USERNAME}!",
-            embed=_video_embed(latest_id, profile, is_retry=False),
+            embed=_video_embed(latest_id, profile, is_retry=False, create_time=profile.get("latest_video_create_time")),
         )
         await db.save_video(latest_id, {"notified": True})
     except Exception as e:
@@ -237,9 +285,11 @@ async def _retry_unnotified_videos(channel):
 
     for video_id in await db.get_unnotified_video_ids():
         try:
+            video_doc = await db.get_video(video_id)
+            create_time = video_doc.get("create_time") if video_doc else None
             await channel.send(
                 content=f"{_mention_prefix()}📢 Video từ @{TIKTOK_USERNAME} (gửi lại)!",
-                embed=_video_embed(video_id, None, is_retry=True),
+                embed=_video_embed(video_id, None, is_retry=True, create_time=create_time),
             )
             await db.save_video(video_id, {"notified": True})
         except Exception as e:
@@ -255,12 +305,23 @@ async def _handle_live_status(profile: dict, channel):
         await db.save_bot_state({"was_live": True})
         if channel is not None:
             live_url = f"https://www.tiktok.com/@{TIKTOK_USERNAME}/live"
+            now_ts = int(time.time())
             embed = discord.Embed(
                 title=f"🔴 {profile['nickname']} đang LIVESTREAM trên TikTok!",
                 url=live_url,
                 description=live_url,
                 color=discord.Color.red(),
                 timestamp=datetime.now(timezone.utc),
+            )
+            embed.add_field(
+                name="📥 Bot phát hiện lúc",
+                value=(
+                    f"<t:{now_ts}:F> (<t:{now_ts}:R>)\n"
+                    f"⚠️ TikTok không cho biết chính xác giờ bắt đầu live, nên "
+                    f"buổi live có thể đã bắt đầu tới ~{_format_delay(CHECK_INTERVAL_SEC)} "
+                    f"trước đó (chu kỳ bot kiểm tra)."
+                ),
+                inline=False,
             )
             if profile.get("avatar_url"):
                 embed.set_thumbnail(url=profile["avatar_url"])
@@ -595,6 +656,7 @@ async def on_message(message: discord.Message):
         _fire_and_forget(_handle_ai_reply(message), "AI reply lỗi")
 
     _maybe_grant_xp(message)
+    _mark_active_today(message.author.id)
 
 
 async def _check_first_message_achievement(message: discord.Message):
@@ -640,6 +702,25 @@ async def _handle_ai_reply(message: discord.Message):
         await message.reply(reply_text, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
     except Exception as e:
         log.warning("Gửi AI reply lỗi: %s", e)
+
+
+def _mark_active_today(user_id: int):
+    global _active_today_date
+    today = features.vn_today_str()
+    if today != _active_today_date:
+        _active_today_date = today
+        _active_today.clear()
+    if user_id in _active_today:
+        return
+    _active_today.add(user_id)
+    asyncio.create_task(_save_active_today(user_id, today))
+
+
+async def _save_active_today(user_id: int, today: str):
+    try:
+        await db.save_user(user_id, {"last_active_date": today})
+    except Exception as e:
+        log.warning("Lưu last_active_date lỗi: %s", e)
 
 
 def _maybe_grant_xp(message: discord.Message):
@@ -746,6 +827,11 @@ async def _build_profile_embed(target: discord.Member) -> discord.Embed:
     status = _STATUS_LABELS.get(getattr(target, "status", discord.Status.offline), "⚫ Offline")
     embed.add_field(name="Trạng thái", value=status, inline=True)
     embed.add_field(name="Role hiện tại", value=_current_role_text(target), inline=True)
+    embed.add_field(
+        name="🔥 Chuỗi Daily",
+        value=features.format_streak_line(data.get("daily_streak", 0), data.get("daily_history", [])),
+        inline=False,
+    )
 
     created_ts = int(target.created_at.timestamp())
     embed.add_field(
@@ -1360,6 +1446,14 @@ async def quest_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
+@tree.command(
+    name="diem-danh",
+    description="Nhận Daily ngay (dùng khi embed Daily bị trôi tin nhắn) - còn hạn từ 0h đến 12h trưa",
+)
+async def diem_danh_cmd(interaction: discord.Interaction):
+    await features.claim_daily(interaction)
+
+
 # ---------------------------------------------------------------------------
 # Slash commands: Chuyển MICK (delay theo số tiền) + ATM
 # ---------------------------------------------------------------------------
@@ -1740,6 +1834,7 @@ _HELP_CATEGORIES = [
             ("/game", "Chơi Wordle · Đoán số · Kéo Búa Bao · Trivia · 🎲 Tài Xỉu · 🃏 Xì Dách (2 game cuối cược MICK thật)"),
             ("/check-game [id_van]", "Tra thông tin/trạng thái 1 ván minigame theo ID riêng"),
             ("/quest", "Xem quest hằng ngày của bạn"),
+            ("/diem-danh", "Nhận Daily ngay (phòng khi embed Daily bị trôi tin nhắn) - còn hạn tới 12h trưa"),
             ("/achievements", "Xem danh sách thành tựu"),
         ],
     },

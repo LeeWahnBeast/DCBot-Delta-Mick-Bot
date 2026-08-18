@@ -16,6 +16,7 @@ ai_chat.py, level_card.py, discord_bot.py, tiktok_client.py, web_server.py.
 import random
 import string
 import time
+import unicodedata
 from datetime import datetime, timedelta, timezone
 
 import discord
@@ -33,6 +34,9 @@ from config import (
     DAILY_DECAY_RATE,
     DAILY_MIN_REWARD,
     DAILY_WINDOW_HOURS,
+    DAILY_CHALLENGE_CHANCE,
+    DAILY_CHALLENGE_BONUS_PERCENT,
+    DAILY_STREAK_HISTORY_LEN,
     WORDLE_WIN_REWARD,
     WORDLE_MAX_GUESSES,
     GUESS_NUMBER_REWARD,
@@ -278,11 +282,28 @@ def build_quest_embed(user: dict, display_name: str) -> discord.Embed:
 #
 # Đúng 0h sáng giờ VN (UTC+7) đăng embed có nút "Nhận Daily". Nhận càng trễ
 # thì MICK càng ít (giảm DAILY_DECAY_RATE mỗi giờ), sàn DAILY_MIN_REWARD.
-# Hết hạn đúng DAILY_WINDOW_HOURS giờ sáng (mặc định 7h).
+# Hết hạn đúng DAILY_WINDOW_HOURS giờ (mặc định 12h trưa).
+#
+# Ngoài bấm nút trên embed, còn có thể gõ lệnh /diem-danh để nhận trực tiếp -
+# phòng trường hợp embed Daily bị trôi mất giữa dòng chat đông người.
+#
+# Random 1 phần trong DAILY_CHALLENGE_CHANCE lượt nhận sẽ hiện 1 câu hỏi phụ
+# (toán nhanh hoặc câu đố dân gian kiểu xưa) - phải trả lời đúng mới nhận
+# được MICK, nhưng trả lời đúng thì được CỘNG THÊM DAILY_CHALLENGE_BONUS_PERCENT%.
+#
+# Chuỗi Daily (daily_streak/daily_history): mỗi ngày lúc 0h (ngay trước khi
+# đăng embed Daily mới), finalize_daily_streaks() chốt trạng thái NGÀY HÔM
+# QUA cho từng user, dùng last_active_date (ngày gần nhất có nhắn tin) để
+# phân biệt "quên điểm danh" (bị reset chuỗi) với "cả ngày không online"
+# (giữ nguyên chuỗi, không phạt):
+#   ✓ (done)   - đã nhận Daily hôm đó
+#   || (paused)- không hề nhắn tin/online cả ngày hôm đó -> không tính là bỏ lỡ
+#   X (missed) - có online/nhắn tin nhưng KHÔNG điểm danh -> chuỗi về 0
 # ===========================================================================
 
 VN_TZ = timezone(timedelta(hours=VN_UTC_OFFSET_HOURS))
 DAILY_CLAIM_CUSTOM_ID = "daily_claim_btn"
+_STREAK_SYMBOLS = {"done": "✓", "missed": "X", "paused": "||"}
 
 
 def vn_now() -> datetime:
@@ -303,11 +324,13 @@ def build_daily_embed() -> discord.Embed:
     embed = discord.Embed(
         title="🎁 Daily hàng ngày",
         description=(
-            f"Bấm nút bên dưới để nhận MICK miễn phí!\n"
+            f"Bấm nút bên dưới (hoặc gõ `/diem-danh` nếu tin nhắn này bị trôi) để nhận MICK miễn phí!\n"
             f"Nhận ngay lúc 0h: **{DAILY_BASE_REWARD} MICK**. "
             f"Càng nhận trễ, MICK càng giảm {int(DAILY_DECAY_RATE * 100)}%/giờ "
             f"(tối thiểu **{DAILY_MIN_REWARD} MICK**).\n"
-            f"⏰ Hết hạn lúc **{DAILY_WINDOW_HOURS}:00 sáng**."
+            f"⏰ Hết hạn lúc **{DAILY_WINDOW_HOURS}:00 trưa**.\n"
+            f"🧩 Ngẫu nhiên có thể gặp 1 câu hỏi phụ (toán nhanh/câu đố dân gian) - "
+            f"trả lời đúng được **+{DAILY_CHALLENGE_BONUS_PERCENT}%** thưởng!"
         ),
         color=discord.Color.gold(),
         timestamp=vn_now().astimezone(timezone.utc),
@@ -326,20 +349,117 @@ class DailyClaimView(discord.ui.View):
         await _handle_claim(interaction)
 
 
-async def _handle_claim(interaction: discord.Interaction):
-    now = vn_now()
-    today = now.strftime("%Y-%m-%d")
+# --- Câu hỏi phụ: toán nhanh + câu đố dân gian kiểu xưa ---------------------
 
-    if now.hour >= DAILY_WINDOW_HOURS:
-        await interaction.response.send_message(
-            f"⏰ Daily hôm nay đã hết hạn (quá {DAILY_WINDOW_HOURS}h sáng). Chờ 0h mai nhé!", ephemeral=True
+
+def _normalize_answer(text: str) -> str:
+    """Chuẩn hoá đáp án để so khớp khoan dung hơn: bỏ khoảng trắng thừa, viết
+    thường, bỏ dấu tiếng Việt (cho phép người chơi gõ không dấu)."""
+    text = (text or "").strip().lower()
+    text = text.replace("đ", "d")
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    return " ".join(text.split())
+
+
+def _gen_math_challenge() -> tuple[str, set[str]]:
+    op = random.choice(["+", "-", "x"])
+    if op == "+":
+        a, b = random.randint(10, 99), random.randint(10, 99)
+        answer = a + b
+    elif op == "-":
+        a, b = random.randint(30, 99), random.randint(1, 29)
+        answer = a - b
+    else:
+        a, b = random.randint(2, 12), random.randint(2, 12)
+        answer = a * b
+    question = f"🧮 {a} {op} {b} = ?"
+    return question, {str(answer)}
+
+
+# Câu đố dân gian kiểu xưa - mỗi câu kèm sẵn vài cách trả lời được chấp nhận
+# (không dấu, viết tắt...) vì đây chỉ là câu hỏi vui, không cần chấm quá khắt khe.
+_FOLK_RIDDLES: list[tuple[str, set[str]]] = [
+    (
+        "📜 Câu đố dân gian: Con gì sáng đi 4 chân, trưa đi 2 chân, chiều tối đi 3 chân?",
+        {"con nguoi", "nguoi"},
+    ),
+    (
+        "📜 Câu đố dân gian: Mỗi năm chỉ ghé thăm 1 lần, mang theo bánh chưng bánh tét, lì xì đầu năm?",
+        {"tet", "tet nguyen dan", "ngay tet"},
+    ),
+    (
+        "📜 Câu đố dân gian: Càng gọt càng ngắn, càng dùng càng cùn, dùng để viết chữ?",
+        {"but chi", "cay but chi"},
+    ),
+    (
+        "📜 Câu đố dân gian: Không chân mà chạy khắp làng trên xóm dưới, không miệng mà ai cũng nghe thấy?",
+        {"tin don"},
+    ),
+    (
+        "📜 Câu đố dân gian: Sáng mọc đằng đông, tối lặn đằng tây, ngày nào cũng đi làm đúng giờ?",
+        {"mat troi"},
+    ),
+]
+
+
+def _random_daily_challenge() -> tuple[str, set[str]]:
+    if random.random() < 0.5:
+        return _gen_math_challenge()
+    question, answers = random.choice(_FOLK_RIDDLES)
+    return question, answers
+
+
+class DailyChallengeModal(discord.ui.Modal):
+    """Modal hỏi 1 câu (toán/câu đố) trước khi cho nhận Daily. Đáp án đưa vào
+    placeholder (giới hạn label của Discord chỉ 45 ký tự, không đủ chứa câu
+    đố dài) để người chơi vẫn thấy rõ câu hỏi ngay trong ô nhập."""
+
+    def __init__(self, question: str, accepted_answers: set[str]):
+        super().__init__(title="🧩 Câu hỏi Daily", timeout=120)
+        self.question = question
+        self.accepted_answers = accepted_answers
+        self.answer_input = discord.ui.TextInput(
+            label="Đáp án của bạn",
+            placeholder=question[:100],
+            max_length=100,
+            required=True,
         )
-        return
+        self.add_item(self.answer_input)
 
+    async def on_submit(self, interaction: discord.Interaction):
+        given = _normalize_answer(self.answer_input.value)
+        if given not in self.accepted_answers:
+            await interaction.response.send_message(
+                f"❌ Chưa đúng rồi! Câu hỏi vừa rồi: {self.question}\n"
+                f"Vẫn còn hạn Daily hôm nay (trước {DAILY_WINDOW_HOURS}h trưa) - "
+                f"bấm nhận Daily lần nữa để thử câu khác nhé!",
+                ephemeral=True,
+            )
+            return
+        await _grant_daily(interaction, vn_today_str(), challenge_bonus=True)
+
+
+def format_streak_line(streak: int, history: list[str], just_claimed: bool = False) -> str:
+    """Vẽ chuỗi Daily kiểu [✓][✓][✓][||][X]. Công khai để discord_bot.py (vd.
+    /profile) dùng lại được, không chỉ nội bộ module này."""
+    boxes = [f"[{_STREAK_SYMBOLS.get(s, '?')}]" for s in history[-DAILY_STREAK_HISTORY_LEN:]]
+    if just_claimed:
+        boxes.append("[✓]")
+        boxes = boxes[-DAILY_STREAK_HISTORY_LEN:]
+    boxes_text = " ".join(boxes) if boxes else "(chưa có dữ liệu)"
+    return f"🔥 Chuỗi Daily: **{streak} ngày** · {boxes_text}"
+
+
+_format_streak_line = format_streak_line  # tương thích ngược cho code nội bộ đã gọi tên cũ
+
+
+async def _grant_daily(interaction: discord.Interaction, today: str, challenge_bonus: bool = False):
+    """Cấp thưởng Daily thật sự (sau khi đã qua mọi kiểm tra/câu hỏi phụ nếu
+    có). Tách riêng khỏi _handle_claim vì đường "trả lời đúng câu hỏi" đến từ
+    1 Interaction KHÁC (của Modal) nên cần gọi lại độc lập."""
     user_id = interaction.user.id
 
-    # Lock theo user_id: chặn double-claim khi bấm nút 2 lần liền/lag mạng
-    # (2 request đọc "last_daily_date" cũ cùng lúc trước khi cái đầu ghi xong).
     async with economy.user_lock(user_id):
         user = await db.get_user(user_id)
         if user.get("last_daily_date") == today:
@@ -350,10 +470,12 @@ async def _handle_claim(interaction: discord.Interaction):
         reset_epoch = daily_state.get("reset_at_epoch")
         if not reset_epoch or daily_state.get("date") != today:
             # Phòng trường hợp bot restart lệch nhịp và chưa có mốc reset hôm nay.
-            reset_epoch = int(now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
+            reset_epoch = int(vn_now().replace(hour=0, minute=0, second=0, microsecond=0).timestamp())
 
         hours_elapsed = int((time.time() - reset_epoch) // 3600)
         reward = compute_daily_reward(hours_elapsed)
+        if challenge_bonus:
+            reward = round(reward * (1 + DAILY_CHALLENGE_BONUS_PERCENT / 100))
 
         # Ghi thẳng ở đây (không gọi economy.add_mick/add_ve) vì đang ở trong
         # user_lock rồi -> asyncio.Lock không reentrant, gọi lại sẽ deadlock.
@@ -365,10 +487,15 @@ async def _handle_claim(interaction: discord.Interaction):
             update["ve"] = new_ve
         await db.save_user(user_id, update)
 
+        streak = user.get("daily_streak", 0)
+        history = list(user.get("daily_history", []))
+
     ve_display = "∞" if is_owner else str(new_ve)
+    bonus_note = f" (🧩 +{DAILY_CHALLENGE_BONUS_PERCENT}% vì trả lời đúng câu hỏi!)" if challenge_bonus else ""
     await interaction.response.send_message(
-        f"🎁 Bạn đã nhận **{reward} Mick** + {TICKET_EMOJI} **{DAILY_TICKET_REWARD} Vé**! "
-        f"(Số dư hiện tại: **{new_balance} MICK** · Vé: **{ve_display}**)",
+        f"🎁 Bạn đã nhận **{reward} Mick**{bonus_note} + {TICKET_EMOJI} **{DAILY_TICKET_REWARD} Vé**! "
+        f"(Số dư hiện tại: **{new_balance} MICK** · Vé: **{ve_display}**)\n"
+        f"{_format_streak_line(streak, history, just_claimed=True)}",
         ephemeral=True,
     )
 
@@ -378,6 +505,79 @@ async def _handle_claim(interaction: discord.Interaction):
             await announce_unlocks(interaction.channel, interaction.user, [unlocked])
     except Exception:
         pass
+
+
+async def _handle_claim(interaction: discord.Interaction):
+    """Điểm vào chung cho cả nút 'Nhận Daily' trên embed VÀ lệnh /diem-danh -
+    hành vi giống hệt nhau, chỉ khác nguồn gọi."""
+    now = vn_now()
+    today = now.strftime("%Y-%m-%d")
+
+    if now.hour >= DAILY_WINDOW_HOURS:
+        await interaction.response.send_message(
+            f"⏰ Daily hôm nay đã hết hạn (quá {DAILY_WINDOW_HOURS}h trưa). Chờ 0h mai nhé!", ephemeral=True
+        )
+        return
+
+    user = await db.get_user(interaction.user.id)
+    if user.get("last_daily_date") == today:
+        await interaction.response.send_message(
+            f"✅ Bạn đã nhận Daily hôm nay rồi!\n"
+            f"{_format_streak_line(user.get('daily_streak', 0), user.get('daily_history', []), just_claimed=True)}",
+            ephemeral=True,
+        )
+        return
+
+    if DAILY_CHALLENGE_CHANCE > 0 and random.random() < DAILY_CHALLENGE_CHANCE:
+        question, accepted = _random_daily_challenge()
+        await interaction.response.send_modal(DailyChallengeModal(question, accepted))
+        return
+
+    await _grant_daily(interaction, today)
+
+
+# Alias công khai - dùng cho lệnh /diem-danh (xem discord_bot.py), tách biệt
+# tên khỏi hàm nội bộ _handle_claim để module khác không cần đụng tới hàm "_".
+claim_daily = _handle_claim
+
+
+async def finalize_daily_streaks() -> None:
+    """Chạy 1 lần/ngày, ngay TRƯỚC khi đăng embed Daily mới (xem
+    maybe_post_daily) - chốt trạng thái NGÀY HÔM QUA cho từng user đã từng
+    xuất hiện trong DB (không quét toàn bộ member server, chỉ user có dữ liệu
+    sẵn - đỡ tốn băng thông Firebase)."""
+    yesterday = (vn_now() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    try:
+        users = await db.get_all_users(use_cache=False)
+    except Exception as e:
+        log.warning("Không đọc được danh sách user để chốt chuỗi Daily: %s", e)
+        return
+
+    for user_id_str, data in users:
+        last_daily = data.get("last_daily_date", "")
+        last_active = data.get("last_active_date", "")
+        streak = data.get("daily_streak", 0)
+        history = list(data.get("daily_history", []))
+
+        if last_daily == yesterday:
+            status = "done"
+            streak += 1
+        elif last_active == yesterday:
+            status = "missed"
+            streak = 0
+        else:
+            # Không hề nhắn tin/online cả ngày hôm qua -> không tính là bỏ
+            # lỡ, giữ nguyên chuỗi (chỉ "tạm ngưng").
+            status = "paused"
+
+        history.append(status)
+        history = history[-DAILY_STREAK_HISTORY_LEN:]
+
+        try:
+            await db.save_user(int(user_id_str), {"daily_streak": streak, "daily_history": history})
+        except Exception as e:
+            log.warning("Chốt chuỗi Daily cho user %s lỗi: %s", user_id_str, e)
 
 
 async def maybe_post_daily(client: discord.Client, channel_id: int) -> None:
@@ -399,6 +599,7 @@ async def maybe_post_daily(client: discord.Client, channel_id: int) -> None:
         except Exception:
             return
 
+    await finalize_daily_streaks()
     await channel.send(embed=build_daily_embed(), view=DailyClaimView())
     await db.save_daily_state({"date": today, "reset_at_epoch": int(time.time())})
 

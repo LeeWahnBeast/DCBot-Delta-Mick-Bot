@@ -135,6 +135,8 @@ async def get_profile(user_id: int) -> dict:
         "xp_needed": needed,
         "uuid": user.get("uuid", ""),
         "is_owner": owner,
+        "daily_streak": user.get("daily_streak", 0),
+        "daily_history": user.get("daily_history", []),
     }
 
 

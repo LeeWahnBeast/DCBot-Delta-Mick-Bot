@@ -913,14 +913,30 @@ async def handle_health(request: web.Request):
 
 
 def _process_stats() -> dict:
-    return {
-        "cpu_percent": _process.cpu_percent(interval=None),
-        "ram_mb": _process.memory_info().rss / (1024 * 1024),
-    }
+    """CPU/RAM của tiến trình. Có thể lỗi trên 1 số môi trường host bị giới
+    hạn quyền đọc /proc (vd. sandbox) -> KHÔNG được để lỗi này làm mất luôn
+    rating_count/rating_avg (xem handle_api_stats bên dưới)."""
+    try:
+        return {
+            "cpu_percent": _process.cpu_percent(interval=None),
+            "ram_mb": _process.memory_info().rss / (1024 * 1024),
+        }
+    except Exception as e:
+        log.warning("Không đọc được CPU/RAM tiến trình: %s", e)
+        return {"cpu_percent": None, "ram_mb": None}
 
 
 async def handle_api_stats(request: web.Request):
-    site = await db.get_site_stats()
+    # 2 nguồn dữ liệu ĐỘC LẬP: nếu đọc CPU/RAM lỗi thì vẫn phải trả về đúng
+    # rating_count/rating_avg/views (trước đây 1 exception ở _process_stats()
+    # làm cả handler crash -> toàn bộ /api/stats trả lỗi -> web hiện "0 đánh
+    # giá"/"☆☆☆☆☆" mặc định dù /api/reviews và /api/rating-distribution vẫn
+    # tải được review thật, gây hiện tượng lệch dữ liệu như trên trang vote).
+    try:
+        site = await db.get_site_stats()
+    except Exception as e:
+        log.warning("Không đọc được site stats (views/rating): %s", e)
+        site = {"views": 0, "rating_count": 0, "rating_avg": 0.0}
     site.update(_process_stats())
     return web.json_response(site)
 

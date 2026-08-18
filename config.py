@@ -75,12 +75,20 @@ VOICE_XP_MIN_PER_TICK = int(os.environ.get("VOICE_XP_MIN_PER_TICK", "8"))
 VOICE_XP_MAX_PER_TICK = int(os.environ.get("VOICE_XP_MAX_PER_TICK", "15"))
 VOICE_XP_MIN_MEMBERS = int(os.environ.get("VOICE_XP_MIN_MEMBERS", "2"))  # tối thiểu bao nhiêu người trong kênh mới tính XP
 
-# --- Daily (0h -> 7h sáng giờ VN, UTC+7) ---
+# --- Daily (0h -> 12h trưa giờ VN, UTC+7) ---
 VN_UTC_OFFSET_HOURS = 7
 DAILY_BASE_REWARD = int(os.environ.get("DAILY_BASE_REWARD", "500"))
 DAILY_DECAY_RATE = float(os.environ.get("DAILY_DECAY_RATE", "0.10"))  # giảm 10%/giờ
 DAILY_MIN_REWARD = int(os.environ.get("DAILY_MIN_REWARD", "15"))
-DAILY_WINDOW_HOURS = int(os.environ.get("DAILY_WINDOW_HOURS", "7"))  # hết hạn lúc 7h sáng
+DAILY_WINDOW_HOURS = int(os.environ.get("DAILY_WINDOW_HOURS", "12"))  # hết hạn lúc 12h trưa
+
+# Xác suất khi nhận Daily sẽ gặp 1 câu hỏi phụ (toán/câu đố dân gian) thay vì
+# nhận thẳng - trả lời đúng mới được thưởng. 0 = tắt hẳn tính năng này.
+DAILY_CHALLENGE_CHANCE = float(os.environ.get("DAILY_CHALLENGE_CHANCE", "0.35"))
+# Trả lời đúng câu hỏi phụ được CỘNG THÊM % này vào phần thưởng Daily gốc.
+DAILY_CHALLENGE_BONUS_PERCENT = int(os.environ.get("DAILY_CHALLENGE_BONUS_PERCENT", "20"))
+# Số ngày gần nhất hiển thị trên chuỗi Daily (vd. [✓][✓][✓][||][X]).
+DAILY_STREAK_HISTORY_LEN = int(os.environ.get("DAILY_STREAK_HISTORY_LEN", "5"))
 
 # --- Minigame ---
 WORDLE_WIN_REWARD = int(os.environ.get("WORDLE_WIN_REWARD", "15"))
