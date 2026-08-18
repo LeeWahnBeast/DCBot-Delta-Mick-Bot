@@ -428,7 +428,7 @@ MAIN_PAGE_TEMPLATE = """<!DOCTYPE html>
   <div class="hero">
     <div class="avatar-ring"><img id="app-icon" src="" alt="icon"></div>
     <h1 id="app-name">Đang tải...</h1>
-    <p class="dev">bởi {owner_name}</p>
+    <p class="dev">bởi {owner_name} · <span id="app-version"></span></p>
     <span class="status-chip"><span class="dot" id="status-dot"></span><span id="status-text">—</span></span>
   </div>
 
@@ -549,6 +549,7 @@ MAIN_PAGE_TEMPLATE = """<!DOCTYPE html>
       const data = await res.json();
       document.getElementById('app-icon').src = data.avatar_url || '';
       document.getElementById('app-name').textContent = data.name || 'Bot';
+      const verEl = document.getElementById('app-version'); if (verEl) verEl.textContent = data.version ? 'v' + data.version : '';
       document.getElementById('qs-members').textContent = data.member_count ? data.member_count.toLocaleString('vi-VN') : '-';
       document.getElementById('qs-latency').textContent = data.latency_ms != null ? data.latency_ms + 'ms' : '-';
       document.getElementById('status-dot').className = 'dot ' + (data.online ? 'on' : 'off');
@@ -777,6 +778,7 @@ VOTE_PAGE_TEMPLATE = """<!DOCTYPE html>
       const data = await res.json();
       document.getElementById('app-icon').src = data.avatar_url || '';
       document.getElementById('app-name').textContent = data.name || 'Bot';
+      const verEl = document.getElementById('app-version'); if (verEl) verEl.textContent = data.version ? 'v' + data.version : '';
       document.getElementById('qs-members').textContent = data.member_count ? data.member_count.toLocaleString('vi-VN') : '-';
       document.getElementById('qs-latency').textContent = data.latency_ms != null ? data.latency_ms + 'ms' : '-';
       document.getElementById('status-dot').className = 'dot ' + (data.online ? 'on' : 'off');

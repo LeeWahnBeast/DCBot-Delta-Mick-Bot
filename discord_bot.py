@@ -62,6 +62,7 @@ import economy
 import features
 import ai_chat
 import level_card
+import versioning
 
 # ---------------------------------------------------------------------------
 # Discord Bot
@@ -87,6 +88,8 @@ _last_xp_ts: dict[int, float] = {}
 _active_today: set[int] = set()
 _active_today_date: str = ""
 _synced = False
+_version_checked = False
+_bot_version: float = versioning.DEFAULT_START_VERSION
 
 # Cache số lượt dùng (uses) của mỗi invite code theo guild, dùng để xác định
 # AI mời khi có thành viên mới join (xem _refresh_invite_cache/on_member_join
@@ -96,7 +99,7 @@ _invite_uses_cache: dict[int, dict[str, int]] = {}
 
 @client.event
 async def on_ready():
-    global _synced
+    global _synced, _version_checked, _bot_version
     log.info("Đã đăng nhập với tài khoản %s (id=%s)", client.user, client.user.id)
 
     client.add_view(features.DailyClaimView())  # persistent view, sống sót qua restart
@@ -104,6 +107,14 @@ async def on_ready():
     if not _synced:
         await tree.sync()
         _synced = True
+
+    if not _version_checked:
+        _version_checked = True
+        try:
+            result = await versioning.check_and_bump_version()
+            _bot_version = result["version"]
+        except Exception as e:
+            log.warning("Kiểm tra version bot lỗi: %s", e)
 
     if not check_tiktok_loop.is_running():
         check_tiktok_loop.start()
@@ -140,6 +151,7 @@ def get_bot_info() -> dict:
             "member_count": 0,
             "latency_ms": None,
             "online": False,
+            "version": _bot_version,
         }
 
     guild_count = len(client.guilds)
@@ -154,6 +166,7 @@ def get_bot_info() -> dict:
         "member_count": member_count,
         "latency_ms": latency_ms,
         "online": client.is_ready() and not client.is_closed(),
+        "version": _bot_version,
     }
 
 
