@@ -219,15 +219,23 @@ async def increment_views() -> int:
     return (snap.to_dict() or {}).get("views", 0)
 
 
-async def submit_rating(voter_id: str, stars: int) -> None:
+async def submit_rating(voter_id: str, stars: int, name: str, comment: str) -> None:
+    """Lưu 1 lượt đánh giá: sao + tên + lý do (bắt buộc phải có đủ tên và lý do).
+    Ghi đè lượt đánh giá cũ của cùng voter_id (tránh 1 người vote nhiều lần)."""
     global _site_stats_cache
+    import time as _time
+
     stars = max(1, min(5, int(stars)))
+    name = (name or "").strip()[:60]
+    comment = (comment or "").strip()[:500]
+    entry = {"stars": stars, "name": name, "comment": comment, "ts": _time.time()}
+
     if _use_memory_fallback:
         doc = _memory_store.setdefault("site/dashboard", {"views": 0, "ratings": {}})
-        doc.setdefault("ratings", {})[voter_id] = stars
+        doc.setdefault("ratings", {})[voter_id] = entry
     else:
         ref = _client.collection("site").document("dashboard")
-        await ref.set({"ratings": {voter_id: stars}}, merge=True)
+        await ref.set({"ratings": {voter_id: entry}}, merge=True)
     _site_stats_cache = None  # invalidate để user thấy điểm mới ngay sau khi vote
 
 
@@ -320,9 +328,26 @@ async def get_site_stats() -> dict:
 
     ratings = doc.get("ratings", {}) or {}
     count = len(ratings)
-    avg = round(sum(ratings.values()) / count, 2) if count else 0.0
+    # ratings cũ (trước khi có tên/comment) lưu trực tiếp là int stars -> vẫn đọc được
+    stars_values = [r["stars"] if isinstance(r, dict) else r for r in ratings.values()]
+    avg = round(sum(stars_values) / count, 2) if count else 0.0
     result = {"views": doc.get("views", 0), "rating_count": count, "rating_avg": avg}
 
     _site_stats_cache = result
     _site_stats_cache_ts = _time.time()
     return result
+
+
+async def get_reviews(limit: int = 30) -> list[dict]:
+    """Trả về danh sách review gần nhất (có tên/sao/comment), mới nhất trước.
+    Review cũ (chỉ có số sao, chưa có tên/comment) bị bỏ qua vì không đủ dữ liệu hiển thị."""
+    if _use_memory_fallback:
+        doc = _memory_store.get("site/dashboard", {"views": 0, "ratings": {}})
+    else:
+        snap = await _client.collection("site").document("dashboard").get()
+        doc = snap.to_dict() or {} if snap.exists else {}
+
+    ratings = doc.get("ratings", {}) or {}
+    reviews = [r for r in ratings.values() if isinstance(r, dict) and r.get("name") and r.get("comment")]
+    reviews.sort(key=lambda r: r.get("ts", 0), reverse=True)
+    return reviews[:limit]

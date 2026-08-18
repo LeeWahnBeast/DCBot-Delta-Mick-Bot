@@ -143,7 +143,7 @@ async def announce_unlocks(channel, user: discord.User, unlocked: list[dict]):
         try:
             embed = discord.Embed(
                 title="🏆 Mở khóa Thành tựu!",
-                description=f"{user.mention} vừa đạt **{info['name']}**\n{info['desc']}\n+**{info['reward']} MICK**",
+                description=f"{user.mention} vừa đạt **{info['name']}**\n{info['desc']}\n💰 Bạn đã nhận **{info['reward']} Mick**",
                 color=discord.Color.gold(),
             )
             await channel.send(embed=embed)
@@ -331,7 +331,7 @@ async def _handle_claim(interaction: discord.Interaction):
         await db.save_user(user_id, {"last_daily_date": today, "mick": new_balance})
 
     await interaction.response.send_message(
-        f"🎁 Bạn nhận được **{reward} MICK**! (Số dư hiện tại: **{new_balance} MICK**)", ephemeral=True
+        f"🎁 Bạn đã nhận **{reward} Mick**! (Số dư hiện tại: **{new_balance} MICK**)", ephemeral=True
     )
 
     try:
@@ -392,6 +392,26 @@ _GAME_STATUS_LABELS = {
 
 # game_id (str, 8 ký tự) -> {"type", "owner_id", "status", "created_at", ...}
 _active_games: dict[str, dict] = {}
+
+
+async def stop_game(game_id: str, user_id: int) -> tuple[bool, int | None]:
+    """Dừng thủ công 1 ván đang chơi (nút Stop). Chỉ owner_id của ván mới dừng được.
+
+    Trả (ok, refunded_amount). refunded_amount khác None nếu ván có cược tiền
+    (Tài Xỉu/Xì Dách) và tiền cược được hoàn lại vì ván chưa có kết quả.
+    Ván bị dừng được XOÁ NGAY khỏi _active_games (giải phóng Game ID ngay lập
+    tức) thay vì chờ GC theo TTL như ván đã có kết quả tự nhiên.
+    """
+    game = _active_games.get(game_id)
+    if not game or game["owner_id"] != user_id or game["status"] != "playing":
+        return False, None
+
+    refunded = None
+    if game["type"] in ("taixiu", "xidach") and game.get("bet"):
+        refunded = await economy.add_mick(user_id, game["bet"])
+
+    _active_games.pop(game_id, None)
+    return True, refunded
 
 
 def _new_game_id() -> str:
@@ -533,7 +553,7 @@ async def process_wordle_guess(game_id: str, guess: str) -> tuple[discord.Embed,
             title=f"🎉 Wordle - Thắng! · #{game_id}",
             description=(
                 f"{_render_board(game)}\n\n"
-                f"Chính xác là **{answer.upper()}**! Bạn nhận **{WORDLE_WIN_REWARD} MICK**.\n"
+                f"Chính xác là **{answer.upper()}**! 💰 Bạn đã nhận **{WORDLE_WIN_REWARD} Mick**.\n"
                 f"Số dư hiện tại: **{new_balance} MICK**."
             ),
             color=discord.Color.green(),
@@ -608,7 +628,7 @@ async def process_guess_number(game_id: str, guess: int) -> tuple[discord.Embed,
         embed = discord.Embed(
             title=f"🎉 Đoán số - Thắng! · #{game_id}",
             description=(
-                f"Số bí mật là **{secret}**! Bạn nhận **{GUESS_NUMBER_REWARD} MICK**.\n"
+                f"Số bí mật là **{secret}**! 💰 Bạn đã nhận **{GUESS_NUMBER_REWARD} Mick**.\n"
                 f"Số dư hiện tại: **{new_balance} MICK**."
             ),
             color=discord.Color.green(),
@@ -663,7 +683,7 @@ async def process_rps(game_id: str, player_choice: str) -> discord.Embed | None:
         result_text, color, status = "🤝 Hòa! Không ai nhận MICK.", discord.Color.greyple(), "draw"
     elif _RPS_BEATS[player_choice] == bot_choice:
         new_balance = await economy.add_mick(user_id, RPS_WIN_REWARD)
-        result_text = f"🎉 Bạn thắng! Nhận **{RPS_WIN_REWARD} MICK** (số dư: {new_balance})"
+        result_text = f"🎉 Bạn thắng! 💰 Bạn đã nhận **{RPS_WIN_REWARD} Mick** (số dư: {new_balance})"
         color, status = discord.Color.green(), "won"
     else:
         result_text, color, status = "😵 Bạn thua! Chúc may mắn lần sau.", discord.Color.red(), "lost"
@@ -732,7 +752,7 @@ async def process_taixiu(game_id: str, choice: str) -> discord.Embed | None:
         new_balance = await economy.add_mick(user_id, payout)
         desc = (
             f"{dice_text} = **{total}** → **{'Tài' if result == 'tai' else 'Xỉu'}**\n\n"
-            f"🎉 Bạn thắng! Nhận **{payout} MICK** (số dư: {new_balance})"
+            f"🎉 Bạn thắng! 💰 Bạn đã nhận **{payout} Mick** (số dư: {new_balance})"
         )
         color, status = discord.Color.green(), "won"
     else:
@@ -880,7 +900,7 @@ async def xidach_stand(game_id: str) -> discord.Embed | None:
         desc = (
             f"Bài của bạn: {_hand_text(player)}\nBài bot: {_hand_text(bot_hand)}"
             f"{' (quắc!)' if bot_bust else ''}\n\n"
-            f"🎉 Bạn thắng!{bonus_text} Nhận **{payout} MICK** (số dư: {new_balance})"
+            f"🎉 Bạn thắng!{bonus_text} 💰 Bạn đã nhận **{payout} Mick** (số dư: {new_balance})"
         )
         color, status = discord.Color.green(), "won"
     elif player_val == bot_val:
@@ -954,7 +974,7 @@ async def process_trivia(game_id: str, chosen_index: int) -> discord.Embed | Non
 
     if won:
         new_balance = await economy.add_mick(user_id, TRIVIA_REWARD_MICK)
-        desc = f"✅ Chính xác! Đáp án là **{options[correct_index]}**.\nBạn nhận **{TRIVIA_REWARD_MICK} MICK** (số dư: {new_balance})"
+        desc = f"✅ Chính xác! Đáp án là **{options[correct_index]}**.\n💰 Bạn đã nhận **{TRIVIA_REWARD_MICK} Mick** (số dư: {new_balance})"
         color, status = discord.Color.green(), "won"
     else:
         desc = f"❌ Sai rồi! Đáp án đúng là **{options[correct_index]}**."
