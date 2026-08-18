@@ -53,8 +53,17 @@ OAUTH_STATE_COOKIE = "mick_oauth_state"
 DISCORD_API = "https://discord.com/api"
 
 # Khoá ký cookie session - PHẢI set qua biến môi trường WEB_SESSION_SECRET trên
-# Render, nếu không mỗi lần restart sẽ tạo khoá mới -> mọi người bị đăng xuất.
-_SESSION_SECRET = os.environ.get("WEB_SESSION_SECRET", "") or "dev-only-insecure-secret-change-me"
+# Render, nếu không mỗi lần restart (kể cả cold-start do idle) sẽ tạo khoá mới
+# -> cookie cũ ký bằng khoá A không verify được với khoá B -> user bấm Phê duyệt
+# xong quay về web vẫn thấy như CHƯA đăng nhập (không có lỗi, chỉ im lặng fail).
+_SESSION_SECRET = os.environ.get("WEB_SESSION_SECRET", "")
+if not _SESSION_SECRET:
+    _SESSION_SECRET = "dev-only-insecure-secret-change-me"
+    log.warning(
+        "WEB_SESSION_SECRET chưa được set trên Render! Mỗi lần server restart, "
+        "toàn bộ session đăng nhập Discord cũ sẽ mất hiệu lực (user phải login lại). "
+        "Vào Render -> Environment -> thêm WEB_SESSION_SECRET (chuỗi random dài) để fix."
+    )
 
 
 def _sign_session(user_id: str, username: str, avatar_url: str) -> str:
