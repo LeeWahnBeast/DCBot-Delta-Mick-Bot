@@ -29,6 +29,9 @@ from config import (
     log,
     QUEST_COUNT_PER_DAY,
     QUEST_REWARD_MICK,
+    QUEST_INVITE_REWARD_MICK,
+    QUEST_INVITE_MIN,
+    QUEST_INVITE_MAX,
     VN_UTC_OFFSET_HOURS,
     DAILY_BASE_REWARD,
     DAILY_DECAY_RATE,
@@ -214,9 +217,42 @@ QUEST_POOL: dict[str, dict] = {
         "target": 1,
     },
     "nsc_tree": {"desc": "Nói `i love nsc because he crashed into a tree.` 1 lần", "target": 1},
+    # target = None: số người cần mời được random riêng cho từng user (xem
+    # get_today_quests) trong khoảng QUEST_INVITE_MIN-QUEST_INVITE_MAX, khác
+    # với các quest khác (target cố định sẵn trong QUEST_POOL).
+    "invite_friends": {"desc": "Mời bạn bè vào server", "target": None},
 }
 
 QUEST_IDS = list(QUEST_POOL.keys())
+
+# Quest nào có target random theo từng user (không cố định trong QUEST_POOL)
+_DYNAMIC_TARGET_QUESTS = {"invite_friends"}
+
+
+def quest_target(user: dict, qid: str) -> int:
+    """Trả về target thật của 1 quest cho user (áp dụng cho cả quest target
+    cố định lẫn quest random target như invite_friends)."""
+    target = QUEST_POOL[qid]["target"]
+    if target is not None:
+        return target
+    return user.get("quest_invite_target") or QUEST_INVITE_MAX
+
+
+def quest_invite_remaining(user: dict) -> int:
+    """Số lượt mời còn thiếu để hoàn thành quest invite_friends hôm nay (tối
+    thiểu 1) - dùng làm max_uses khi bot tạo link mời, để Discord TỰ ĐỘNG xoá
+    link ngay khi đạt đủ số lượt cần, không cần bot tự dò/xoá thủ công."""
+    target = quest_target(user, "invite_friends")
+    progress = user.get("quest_progress", {}).get("invite_friends", 0)
+    return max(1, target - progress)
+
+
+def quest_desc(user: dict, qid: str) -> str:
+    """Mô tả hiển thị của 1 quest, có nội suy target random (vd. số người cần mời)."""
+    if qid == "invite_friends":
+        target = quest_target(user, qid)
+        return f"Mời {target} người bạn vào server (+{QUEST_INVITE_REWARD_MICK} MICK/người được mời)"
+    return QUEST_POOL[qid]["desc"]
 
 
 async def get_today_quests(user_id: int) -> dict:
@@ -229,6 +265,8 @@ async def get_today_quests(user_id: int) -> dict:
 
     quest_ids = random.sample(QUEST_IDS, min(QUEST_COUNT_PER_DAY, len(QUEST_IDS)))
     update = {"quest_date": today, "quest_ids": quest_ids, "quest_progress": {}, "quest_done": []}
+    if "invite_friends" in quest_ids:
+        update["quest_invite_target"] = random.randint(QUEST_INVITE_MIN, QUEST_INVITE_MAX)
     await db.save_user(user_id, update)
     user.update(update)
     return user
@@ -239,6 +277,11 @@ async def bump_progress(user_id: int, event_key: str, amount: int = 1) -> dict |
     Cộng tiến độ cho quest nào (nếu có trong bộ quest hôm nay của user) khớp event_key.
     event_key phải trùng với id trong QUEST_POOL. Trả về quest info nếu VỪA hoàn thành, None nếu chưa.
     """
+    if event_key in _DYNAMIC_TARGET_QUESTS:
+        # Quest có target random/luồng thưởng riêng (vd. invite_friends) - dùng
+        # bump_invite_progress() tương ứng, không đi qua đường chung này.
+        return None
+
     user = await get_today_quests(user_id)
     if event_key not in user["quest_ids"]:
         return None
@@ -260,17 +303,73 @@ async def bump_progress(user_id: int, event_key: str, amount: int = 1) -> dict |
     return None
 
 
-def build_quest_embed(user: dict, display_name: str) -> discord.Embed:
+async def bump_invite_progress(inviter_id: int) -> dict | None:
+    """Gọi khi 1 thành viên mới join server nhờ link mời của inviter_id.
+
+    Khác với bump_progress(): quest 'invite_friends' thưởng MICK NGAY mỗi lượt
+    mời (không đợi hoàn thành), và target là số random 1-10 riêng cho user đó
+    (xem get_today_quests). Khi đạt target, quest được đánh dấu hoàn thành
+    (biến mất khỏi danh sách quest còn thiếu, giống các quest khác).
+
+    Trả về None nếu user không có quest này hôm nay hoặc đã hoàn thành rồi.
+    Ngược lại trả dict thông tin lượt mời (đã thưởng MICK dù đạt target hay chưa).
+    """
+    qid = "invite_friends"
+    user = await get_today_quests(inviter_id)
+    if qid not in user.get("quest_ids", []):
+        return None
+    if qid in user.get("quest_done", []):
+        return None
+
+    target = quest_target(user, qid)
+    progress = dict(user.get("quest_progress", {}))
+    progress[qid] = progress.get(qid, 0) + 1
+    invited_count = progress[qid]
+
+    # Thưởng ngay mỗi lượt mời, bất kể đã đạt target hay chưa.
+    new_balance = await economy.add_mick(inviter_id, QUEST_INVITE_REWARD_MICK)
+
+    result = {
+        "id": qid,
+        "invited_count": invited_count,
+        "target": target,
+        "reward": QUEST_INVITE_REWARD_MICK,
+        "new_balance": new_balance,
+        "completed": False,
+    }
+
+    if invited_count >= target:
+        done = list(user.get("quest_done", []))
+        done.append(qid)
+        code = user.get("quest_invite_code") or ""
+        await db.save_user(
+            inviter_id,
+            {"quest_progress": progress, "quest_done": done, "quest_invite_code": "", "quest_invite_code_date": ""},
+        )
+        if code:
+            await db.delete_invite_owner(code)
+        result["completed"] = True
+        result["invite_code"] = code
+    else:
+        await db.save_user(inviter_id, {"quest_progress": progress})
+
+    return result
+
+
+def build_quest_embed(user: dict, display_name: str, invite_link: str | None = None) -> discord.Embed:
     embed = discord.Embed(title=f"📜 Quest hằng ngày của {display_name}", color=discord.Color.teal())
     done = set(user.get("quest_done", []))
     progress = user.get("quest_progress", {})
 
     lines = []
     for qid in user.get("quest_ids", []):
-        quest = QUEST_POOL[qid]
+        target = quest_target(user, qid)
         mark = "✅" if qid in done else "⬜"
         cur = progress.get(qid, 0)
-        lines.append(f"{mark} {quest['desc']} — `{min(cur, quest['target'])}/{quest['target']}`")
+        line = f"{mark} {quest_desc(user, qid)} — `{min(cur, target)}/{target}`"
+        if qid == "invite_friends" and qid not in done and invite_link:
+            line += f"\n> 🔗 Link mời của bạn: {invite_link}"
+        lines.append(line)
 
     embed.description = "\n".join(lines) if lines else "Chưa có quest, gõ lại lệnh để random."
     embed.set_footer(text=f"Mỗi quest hoàn thành: +{QUEST_REWARD_MICK} MICK · Reset 0h giờ VN")

@@ -53,6 +53,7 @@ from config import (
     TRIVIA_TIMEOUT_SEC,
     TICKET_EMOJI,
     GAME_TICKET_COST,
+    QUEST_CHANNEL_ID,
     log,
 )
 from tiktok_client import TikTokClient
@@ -87,6 +88,11 @@ _active_today: set[int] = set()
 _active_today_date: str = ""
 _synced = False
 
+# Cache số lượt dùng (uses) của mỗi invite code theo guild, dùng để xác định
+# AI mời khi có thành viên mới join (xem _refresh_invite_cache/on_member_join
+# ở phần "Quest mời bạn bè" bên dưới). {guild_id: {invite_code: uses}}
+_invite_uses_cache: dict[int, dict[str, int]] = {}
+
 
 @client.event
 async def on_ready():
@@ -114,6 +120,10 @@ async def on_ready():
     if not learn_word_flush_loop.is_running():
         learn_word_flush_loop.start()
         guess_meaning_loop.start()
+
+    guild = client.get_guild(DISCORD_GUILD_ID)
+    if guild is not None:
+        await _refresh_invite_cache(guild)
 
 
 def get_bot_info() -> dict:
@@ -608,6 +618,155 @@ async def _announce_level_up(member: discord.Member, result: dict):
             await features.announce_unlocks(channel, member, unlocked)
     except Exception as e:
         log.warning("Kiểm tra thành tựu sau voice XP lỗi: %s", e)
+
+
+# ---------------------------------------------------------------------------
+# Quest mời bạn bè: bot TỰ TẠO 1 link mời riêng cho từng user (xem
+# _get_or_create_invite_link, gọi từ lệnh /quest), rồi nhận diện AI vừa mời
+# khi có thành viên mới join bằng cách so khớp CHÍNH LINK ĐÓ - không dựa vào
+# invite.inviter (vì link do bot tạo nên inviter luôn là bot, không phải
+# user) và không cần quan tâm vanity URL của server.
+#
+# Link được tạo với max_uses = số lượt còn thiếu để hoàn thành quest, nên
+# Discord sẽ TỰ ĐỘNG xoá link ngay khi đạt đủ số lượt cần.
+# Cần bot có quyền "Create Invite" ở kênh tạo link (và "Manage Server" để đọc
+# lại danh sách invite khi có người join).
+# ---------------------------------------------------------------------------
+
+
+async def _refresh_invite_cache(guild: discord.Guild) -> dict[str, int]:
+    """Đọc lại toàn bộ invite hiện có của guild và lưu vào cache. Trả về cache
+    CŨ (trước khi refresh) để nơi gọi có thể so sánh tìm invite vừa dùng."""
+    old = _invite_uses_cache.get(guild.id, {})
+    try:
+        invites = await guild.invites()
+    except discord.Forbidden:
+        log.warning(
+            "Bot không có quyền 'Manage Server' nên không đọc được danh sách invite "
+            "- quest mời bạn bè sẽ không hoạt động."
+        )
+        return old
+    except Exception as e:
+        log.warning("Đọc danh sách invite lỗi: %s", e)
+        return old
+
+    _invite_uses_cache[guild.id] = {inv.code: (inv.uses or 0) for inv in invites}
+    return old
+
+
+@client.event
+async def on_invite_create(invite: discord.Invite):
+    if invite.guild is None:
+        return
+    _invite_uses_cache.setdefault(invite.guild.id, {})[invite.code] = invite.uses or 0
+
+
+@client.event
+async def on_invite_delete(invite: discord.Invite):
+    if invite.guild is None:
+        return
+    _invite_uses_cache.get(invite.guild.id, {}).pop(invite.code, None)
+    # Dọn luôn mapping code -> user nếu link này từng được bot tạo cho quest
+    # (vd. Discord tự xoá link do đạt max_uses, hoặc admin xoá tay).
+    _fire_and_forget(db.delete_invite_owner(invite.code), "Dọn invite_codes lỗi")
+
+
+async def _get_or_create_invite_link(guild: discord.Guild, user: discord.abc.User, user_doc: dict) -> str | None:
+    """Trả về link mời (discord.gg/...) dành riêng cho user để phục vụ quest
+    mời bạn bè hôm nay. Dùng lại link cũ nếu còn hợp lệ (tạo cùng ngày VÀ vẫn
+    còn tồn tại trên Discord), ngược lại tạo mới."""
+    today = features.vn_today_str()
+    code = user_doc.get("quest_invite_code") or ""
+
+    if code and user_doc.get("quest_invite_code_date") == today:
+        try:
+            invites = await guild.invites()
+            if any(inv.code == code for inv in invites):
+                return f"https://discord.gg/{code}"
+        except Exception:
+            pass  # không đọc được thì cứ tạo link mới cho chắc
+
+    channel = guild.get_channel(QUEST_CHANNEL_ID)
+    if channel is None or not isinstance(channel, discord.TextChannel):
+        channel = guild.system_channel
+    if channel is None or not channel.permissions_for(guild.me).create_instant_invite:
+        for ch in guild.text_channels:
+            if ch.permissions_for(guild.me).create_instant_invite:
+                channel = ch
+                break
+        else:
+            channel = None
+    if channel is None:
+        return None
+
+    remaining = features.quest_invite_remaining(user_doc)
+    try:
+        invite = await channel.create_invite(
+            max_age=0,
+            max_uses=remaining,
+            unique=True,
+            reason=f"Quest mời bạn bè - {user}",
+        )
+    except discord.Forbidden:
+        log.warning("Bot không có quyền 'Create Invite' ở kênh %s.", getattr(channel, "name", channel))
+        return None
+    except Exception as e:
+        log.warning("Tạo invite cho quest mời bạn bè lỗi: %s", e)
+        return None
+
+    _invite_uses_cache.setdefault(guild.id, {})[invite.code] = invite.uses or 0
+    await db.save_user(user.id, {"quest_invite_code": invite.code, "quest_invite_code_date": today})
+    await db.save_invite_owner(invite.code, user.id)
+    return f"https://discord.gg/{invite.code}"
+
+
+@client.event
+async def on_member_join(member: discord.Member):
+    if member.bot or member.guild.id != DISCORD_GUILD_ID:
+        return
+
+    old_uses = await _refresh_invite_cache(member.guild)
+    new_uses = _invite_uses_cache.get(member.guild.id, {})
+
+    # Code nào tăng uses, hoặc biến mất hẳn (Discord tự xoá do vừa chạm
+    # max_uses ngay lượt join này), đều là ứng viên "vừa được dùng".
+    candidates = [c for c, u in old_uses.items() if new_uses.get(c, -1) != u]
+    candidates += [c for c in new_uses if c not in old_uses]
+
+    inviter_id = None
+    for code in candidates:
+        owner_id = await db.get_invite_owner(code)
+        if owner_id and owner_id != member.id:
+            inviter_id = owner_id
+            break
+
+    if inviter_id is None:
+        return
+
+    try:
+        finished = await features.bump_invite_progress(inviter_id)
+    except Exception as e:
+        log.warning("Cập nhật quest mời bạn bè lỗi: %s", e)
+        return
+    if finished is None:
+        return
+
+    channel = client.get_channel(QUEST_CHANNEL_ID)
+    if channel is None:
+        return
+
+    try:
+        inviter_mention = f"<@{inviter_id}>"
+        text = (
+            f"🎉 {inviter_mention} vừa mời {member.mention} vào server! "
+            f"💰 Nhận **{finished['reward']} Mick** (số dư: {finished['new_balance']}) "
+            f"— tiến độ quest mời bạn: `{min(finished['invited_count'], finished['target'])}/{finished['target']}`"
+        )
+        if finished["completed"]:
+            text += "\n✅ Hoàn thành quest **Mời bạn bè vào server**! Link mời đã tự động bị Discord xoá."
+        await channel.send(text)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -1442,7 +1601,13 @@ async def achievements_cmd(interaction: discord.Interaction):
 @tree.command(name="quest", description="Xem quest hằng ngày của bạn")
 async def quest_cmd(interaction: discord.Interaction):
     user = await features.get_today_quests(interaction.user.id)
-    embed = features.build_quest_embed(user, interaction.user.display_name)
+
+    invite_link = None
+    if "invite_friends" in user.get("quest_ids", []) and "invite_friends" not in user.get("quest_done", []):
+        if interaction.guild is not None:
+            invite_link = await _get_or_create_invite_link(interaction.guild, interaction.user, user)
+
+    embed = features.build_quest_embed(user, interaction.user.display_name, invite_link=invite_link)
     await interaction.response.send_message(embed=embed)
 
 

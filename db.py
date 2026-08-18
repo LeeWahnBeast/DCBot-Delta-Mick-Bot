@@ -229,6 +229,18 @@ async def _set_doc(collection: str, doc_id: str, data: dict, merge: bool = True)
         return False
 
 
+async def _delete_doc(collection: str, doc_id: str) -> bool:
+    if _use_memory_fallback:
+        _memory_store.pop(f"{collection}/{doc_id}", None)
+        return True
+    try:
+        _, ok = await _rtdb_request("DELETE", f"{collection}/{_safe_key(doc_id)}")
+        return ok
+    except Exception as e:
+        _warn_throttled(f"xoá {collection}/{doc_id}", str(e))
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Đọc/ghi có kiểm tra ETag (transaction thủ công) - dùng cho Increment (lượt
 # xem, tần suất từ học) để tránh mất dữ liệu khi 2 request ghi đồng thời.
@@ -334,6 +346,32 @@ async def get_unnotified_video_ids(limit: int = 5) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# invite_codes: map link mời (Discord invite code) do bot TỰ TẠO cho quest
+# "mời bạn bè" -> user sở hữu link đó. Dùng để xác định chính xác ai vừa được
+# cộng MICK khi có người join qua link, KHÔNG dựa vào invite.inviter (vì link
+# do chính bot tạo nên inviter sẽ luôn là bot, không phải user) - xem
+# discord_bot.py: _get_or_create_invite_link() / on_member_join().
+# ---------------------------------------------------------------------------
+
+
+async def get_invite_owner(code: str) -> int | None:
+    data = await _get_doc("invite_codes", code)
+    uid = data.get("user_id")
+    try:
+        return int(uid) if uid else None
+    except (TypeError, ValueError):
+        return None
+
+
+async def save_invite_owner(code: str, user_id: int) -> bool:
+    return await _set_doc("invite_codes", code, {"user_id": user_id}, merge=False)
+
+
+async def delete_invite_owner(code: str) -> bool:
+    return await _delete_doc("invite_codes", code)
+
+
+# ---------------------------------------------------------------------------
 # users: MICK, XP, level, Daily
 # ---------------------------------------------------------------------------
 
@@ -353,6 +391,8 @@ DEFAULT_USER = {
     "quest_ids": [],  # 3 quest hôm nay
     "quest_progress": {},  # {quest_id: count}
     "quest_done": [],  # quest_id đã hoàn thành hôm nay
+    "quest_invite_code": "",  # code link mời riêng (quest mời bạn bè) bot tự tạo hôm nay
+    "quest_invite_code_date": "",  # ngày (VN) tạo quest_invite_code, để biết khi nào cần tạo lại
     "uuid": "",  # UUID riêng, cấp 1 lần duy nhất khi user xuất hiện lần đầu
     "web_link_reward_claimed": False,  # đã nhận thưởng liên kết Discord trên web chưa
     "web_rate5_reward_claimed": False,  # đã nhận thưởng đánh giá 5 sao trên web chưa

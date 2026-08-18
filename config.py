@@ -135,6 +135,13 @@ ACHIEVEMENT_EASY_REWARD_MIN = int(os.environ.get("ACHIEVEMENT_EASY_REWARD_MIN", 
 QUEST_COUNT_PER_DAY = int(os.environ.get("QUEST_COUNT_PER_DAY", "3"))
 QUEST_REWARD_MICK = int(os.environ.get("QUEST_REWARD_MICK", "20"))
 
+# --- Quest mời bạn bè: số người cần mời random 1-10, mỗi người mời được
+# thưởng ngay QUEST_INVITE_REWARD_MICK (khác các quest khác chỉ thưởng khi
+# hoàn thành) ---
+QUEST_INVITE_REWARD_MICK = int(os.environ.get("QUEST_INVITE_REWARD_MICK", "89"))
+QUEST_INVITE_MIN = int(os.environ.get("QUEST_INVITE_MIN", "1"))
+QUEST_INVITE_MAX = int(os.environ.get("QUEST_INVITE_MAX", "10"))
+
 # --- AI Chat (Groq) ---
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
