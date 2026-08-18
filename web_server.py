@@ -159,7 +159,7 @@ SHARED_HEAD = """<meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <link rel="icon" href="data:,">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Google+Sans+Text:wght@400;500;700&family=Roboto:wght@400;500;700&family=Roboto+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script>
   (function() {{
     var saved = localStorage.getItem('mick-theme');
@@ -167,61 +167,67 @@ SHARED_HEAD = """<meta charset="UTF-8">
   }})();
 </script>
 <style>
+  /* ---------------------------------------------------------------------
+     Material You 3 (M3) tonal palette. Dark = M3 dark scheme, Light = M3
+     light scheme. Surfaces dùng "surface container" tone thay vì border
+     cứng - phân lớp bằng elevation (shadow) + độ sáng nhích dần.
+  --------------------------------------------------------------------- */
   :root, [data-theme="dark"] {{
     color-scheme: dark;
-    --bg: #08070f; --bg-2: #0d0c1a; --surface: #141225; --surface-2: #1c1a33;
-    --ink: #f3f2fb; --muted: #918cb0; --outline: #2a2748;
-    --blurple: #5865f2; --cyan: #35e6c8; --violet: #b06bff; --pink: #ff5fa2;
-    --online: #35e67a; --offline: #ff5f6d;
-    --shadow-soft: rgba(0,0,0,.25);
+    --bg: #131318; --surface: #1d1b20; --surface-2: #272530; --surface-3: #322f3b;
+    --ink: #e6e0e9; --muted: #cac4d0; --outline: #49454f;
+    --primary: #a8c7fa; --on-primary: #062e6f; --primary-container: #1b4695;
+    --secondary: #c6c5d0; --tertiary: #dbbde0;
+    --online: #a1d5a8; --offline: #ffb4ab;
+    --elev-1: 0 1px 3px rgba(0,0,0,.35), 0 1px 2px rgba(0,0,0,.3);
+    --elev-2: 0 3px 8px rgba(0,0,0,.4), 0 1px 3px rgba(0,0,0,.3);
   }}
   [data-theme="light"] {{
     color-scheme: light;
-    --bg: #f3f1fb; --bg-2: #eae7fb; --surface: #ffffff; --surface-2: #f1eef9;
-    --ink: #17152a; --muted: #6d688b; --outline: #ded9f2;
-    --blurple: #5865f2; --cyan: #0fb89e; --violet: #8d4de0; --pink: #e0447e;
-    --online: #1aa354; --offline: #e0313f;
-    --shadow-soft: rgba(88,101,242,.12);
+    --bg: #fdf8fd; --surface: #ffffff; --surface-2: #f3edf7; --surface-3: #ece6f0;
+    --ink: #1d1b20; --muted: #49454f; --outline: #cac4d0;
+    --primary: #415f91; --on-primary: #ffffff; --primary-container: #d6e3ff;
+    --secondary: #565e71; --tertiary: #6b5778;
+    --online: #2e7d32; --offline: #ba1a1a;
+    --elev-1: 0 1px 3px rgba(0,0,0,.10), 0 1px 2px rgba(0,0,0,.08);
+    --elev-2: 0 3px 8px rgba(0,0,0,.12), 0 1px 3px rgba(0,0,0,.08);
   }}
   :root {{
-    --font-display: "Space Grotesk", sans-serif;
-    --font-body: "Inter", "Segoe UI", sans-serif;
-    --font-mono: "JetBrains Mono", ui-monospace, monospace;
+    --font-display: "Google Sans Text", "Roboto", sans-serif;
+    --font-body: "Roboto", "Segoe UI", sans-serif;
+    --font-mono: "Roboto Mono", ui-monospace, monospace;
   }}
   * {{ box-sizing: border-box; }}
   body {{
-    margin: 0; color: var(--ink); transition: background-color .2s, color .2s;
-    background:
-      radial-gradient(600px 300px at 15% -5%, rgba(88,101,242,.35), transparent 60%),
-      radial-gradient(500px 260px at 100% 0%, rgba(176,107,255,.25), transparent 55%),
-      linear-gradient(180deg, var(--bg-2), var(--bg) 30%);
+    margin: 0; color: var(--ink); background: var(--bg); transition: background-color .2s, color .2s;
     font-family: var(--font-body);
     display: flex; justify-content: center;
   }}
   .wrap {{ width: 100%; max-width: 480px; padding-bottom: 60px; }}
   a {{ color: inherit; }}
-  :focus-visible {{ outline: 2px solid var(--cyan); outline-offset: 2px; }}
+  :focus-visible {{ outline: 2px solid var(--primary); outline-offset: 2px; }}
 
   /* --- top tag --- */
   .topbar {{ display: flex; justify-content: space-between; align-items: center; padding: 18px 20px 4px; gap: 8px; }}
   .tag {{
-    font-family: var(--font-mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
-    color: var(--muted); border: 1px solid var(--outline); border-radius: 100px; padding: 4px 10px;
-    background: rgba(88,101,242,.08);
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: .04em;
+    color: var(--muted); border-radius: 100px; padding: 5px 12px;
+    background: var(--surface-2);
   }}
   .topbar-right {{ display: flex; align-items: center; gap: 8px; }}
   .theme-toggle {{
-    width: 30px; height: 30px; border-radius: 100px; border: 1px solid var(--outline);
-    background: var(--surface); color: var(--ink); cursor: pointer; font-size: 14px;
+    width: 34px; height: 34px; border-radius: 100px; border: none;
+    background: var(--surface-2); color: var(--ink); cursor: pointer; font-size: 15px;
     display: flex; align-items: center; justify-content: center; padding: 0;
+    box-shadow: var(--elev-1);
   }}
-  .theme-toggle:hover {{ border-color: var(--cyan); }}
+  .theme-toggle:hover {{ background: var(--surface-3); }}
   .nav-link {{
-    font-family: var(--font-mono); font-size: 11px; color: var(--muted); text-decoration: none;
-    border: 1px solid var(--outline); border-radius: 100px; padding: 6px 12px; display: inline-flex;
-    align-items: center; gap: 4px;
+    font-family: var(--font-body); font-weight: 500; font-size: 13px; color: var(--primary); text-decoration: none;
+    border-radius: 100px; padding: 7px 14px; display: inline-flex;
+    align-items: center; gap: 4px; background: var(--surface-2);
   }}
-  .nav-link:hover {{ color: var(--cyan); border-color: var(--cyan); }}
+  .nav-link:hover {{ background: var(--surface-3); }}
 
   /* --- intro / creator card --- */
   .intro-card {{
@@ -229,43 +235,39 @@ SHARED_HEAD = """<meta charset="UTF-8">
   }}
   .creator-row {{
     display: flex; align-items: center; justify-content: space-between; gap: 10px;
-    padding: 10px 12px; background: var(--surface-2); border-radius: 12px;
+    padding: 12px 14px; background: var(--surface-2); border-radius: 16px;
   }}
-  .creator-row .who {{ display: flex; flex-direction: column; gap: 1px; }}
-  .creator-row .role {{ font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }}
-  .creator-row .name {{ font-size: 13px; font-weight: 600; }}
+  .creator-row .who {{ display: flex; flex-direction: column; gap: 2px; }}
+  .creator-row .role {{ font-size: 11px; color: var(--muted); }}
+  .creator-row .name {{ font-size: 14px; font-weight: 500; }}
   .tiktok-link {{
-    display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 12px;
-    color: var(--ink); text-decoration: none; background: var(--surface); border: 1px solid var(--outline);
-    border-radius: 100px; padding: 6px 12px; white-space: nowrap;
+    display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-body); font-weight: 500; font-size: 12px;
+    color: var(--on-primary); text-decoration: none; background: var(--primary);
+    border-radius: 100px; padding: 8px 14px; white-space: nowrap;
   }}
-  .tiktok-link:hover {{ border-color: var(--pink); color: var(--pink); }}
+  .tiktok-link:hover {{ filter: brightness(1.08); }}
   .about-text {{ font-size: 13px; color: var(--muted); line-height: 1.6; margin: 0; }}
 
   /* --- hero player card --- */
   .hero {{ display: flex; flex-direction: column; align-items: center; text-align: center; padding: 20px 20px 8px; }}
   .avatar-ring {{
     width: 96px; height: 96px; border-radius: 28px; padding: 3px;
-    background: conic-gradient(from 0deg, var(--blurple), var(--cyan), var(--violet), var(--pink), var(--blurple));
-    animation: spin 6s linear infinite;
-    box-shadow: 0 0 30px rgba(88,101,242,.35);
+    background: var(--primary-container);
+    box-shadow: var(--elev-2);
   }}
-  @media (prefers-reduced-motion: reduce) {{ .avatar-ring {{ animation: none; }} }}
-  @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
   .avatar-ring img {{
     width: 100%; height: 100%; border-radius: 25px; object-fit: cover; display: block;
     background: var(--surface-2);
   }}
   .hero h1 {{
     font-family: var(--font-display); font-weight: 700; font-size: 24px; margin: 14px 0 2px;
-    background: linear-gradient(90deg, #fff, var(--cyan) 120%);
-    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+    color: var(--ink);
   }}
   .hero .dev {{ color: var(--muted); font-size: 13px; margin: 0; }}
   .status-chip {{
     display: inline-flex; align-items: center; gap: 6px; margin-top: 10px;
-    font-family: var(--font-mono); font-size: 11px; padding: 5px 12px; border-radius: 100px;
-    background: var(--surface-2); border: 1px solid var(--outline);
+    font-family: var(--font-body); font-weight: 500; font-size: 12px; padding: 6px 14px; border-radius: 100px;
+    background: var(--surface-2);
   }}
   .status-chip .dot {{ width: 7px; height: 7px; border-radius: 50%; }}
   .status-chip .dot.on {{ background: var(--online); box-shadow: 0 0 8px var(--online); }}
@@ -273,40 +275,32 @@ SHARED_HEAD = """<meta charset="UTF-8">
 
   .btn-row {{ display: flex; gap: 10px; padding: 18px 20px 4px; }}
   .btn-pill {{
-    flex: 1; text-align: center; padding: 11px 0; border-radius: 12px; font-size: 14px;
-    font-weight: 600; cursor: pointer; border: none; font-family: var(--font-body);
+    flex: 1; text-align: center; padding: 12px 0; border-radius: 100px; font-size: 14px;
+    font-weight: 500; cursor: pointer; border: none; font-family: var(--font-body);
     text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   }}
-  .btn-pill.primary {{ background: linear-gradient(90deg, var(--blurple), var(--violet)); color: #fff; }}
-  .btn-pill.outline {{ background: transparent; color: var(--ink); border: 1px solid var(--outline); }}
-  .btn-pill.primary:hover {{ filter: brightness(1.1); }}
-  .btn-pill.outline:hover {{ border-color: var(--cyan); color: var(--cyan); }}
+  .btn-pill.primary {{ background: var(--primary); color: var(--on-primary); box-shadow: var(--elev-1); }}
+  .btn-pill.outline {{ background: var(--surface-2); color: var(--ink); }}
+  .btn-pill.primary:hover {{ filter: brightness(1.06); }}
+  .btn-pill.outline:hover {{ background: var(--surface-3); }}
 
   /* --- scoreboard strip --- */
   .scoreboard {{ display: flex; gap: 10px; padding: 18px 20px 4px; }}
   .score-block {{
-    flex: 1; background: var(--surface); border-radius: 12px; padding: 12px 10px;
-    text-align: center; position: relative; overflow: hidden;
+    flex: 1; background: var(--surface); border-radius: 16px; padding: 14px 10px;
+    text-align: center; box-shadow: var(--elev-1);
   }}
-  .score-block::before {{
-    content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px;
-    background: linear-gradient(90deg, var(--blurple), var(--cyan));
-  }}
-  .score-block .val {{ font-family: var(--font-mono); font-weight: 600; font-size: 17px; }}
-  .score-block .val .star {{ color: var(--cyan); }}
-  .score-block .label {{ font-size: 10px; color: var(--muted); margin-top: 4px; text-transform: uppercase; letter-spacing: .06em; }}
+  .score-block .val {{ font-family: var(--font-display); font-weight: 700; font-size: 17px; }}
+  .score-block .val .star {{ color: var(--primary); }}
+  .score-block .label {{ font-size: 10px; color: var(--muted); margin-top: 4px; }}
 
   /* --- panel --- */
-  .panel {{ margin: 18px 20px 0; background: var(--surface); border-radius: 16px; padding: 18px; position: relative; overflow: hidden; border: 1px solid var(--outline); }}
-  .panel::before {{
-    content: ""; position: absolute; top: 0; left: 18px; right: 18px; height: 2px;
-    background: linear-gradient(90deg, var(--blurple), transparent 70%);
-  }}
-  .panel h2 {{ font-family: var(--font-display); font-size: 15px; font-weight: 700; margin: 4px 0 14px; }}
+  .panel {{ margin: 18px 20px 0; background: var(--surface); border-radius: 24px; padding: 20px; box-shadow: var(--elev-1); }}
+  .panel h2 {{ font-family: var(--font-display); font-size: 15px; font-weight: 700; margin: 0 0 14px; color: var(--ink); }}
   .row {{ display: flex; align-items: center; justify-content: space-between; }}
   .muted {{ color: var(--muted); font-size: 13px; }}
 
-  .info-line {{ display: flex; justify-content: space-between; padding: 7px 0; font-size: 13px; }}
+  .info-line {{ display: flex; justify-content: space-between; padding: 8px 0; font-size: 13px; }}
   .info-line .k {{ color: var(--muted); }}
   .info-line .v {{ font-family: var(--font-mono); }}
   .dot-online {{ color: var(--online); }}
@@ -315,59 +309,60 @@ SHARED_HEAD = """<meta charset="UTF-8">
   /* --- profile panel --- */
   .profile-hidden {{ display: none; }}
   .profile-card {{ display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }}
-  .profile-card img {{ width: 48px; height: 48px; border-radius: 14px; border: 2px solid var(--blurple); }}
+  .profile-card img {{ width: 48px; height: 48px; border-radius: 16px; }}
   .profile-card .pname {{ font-weight: 700; font-size: 15px; }}
-  .profile-card .plevel {{ font-family: var(--font-mono); font-size: 11px; color: var(--cyan); }}
+  .profile-card .plevel {{ font-family: var(--font-mono); font-size: 11px; color: var(--primary); }}
   .profile-stats {{ display: flex; gap: 10px; }}
-  .pstat {{ flex: 1; background: var(--surface-2); border-radius: 10px; padding: 10px; text-align: center; }}
+  .pstat {{ flex: 1; background: var(--surface-2); border-radius: 14px; padding: 10px; text-align: center; }}
   .pstat .n {{ font-family: var(--font-mono); font-weight: 700; font-size: 15px; }}
-  .pstat .l {{ font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-top: 2px; }}
+  .pstat .l {{ font-size: 10px; color: var(--muted); margin-top: 2px; }}
   .xp-track {{ height: 8px; border-radius: 5px; background: var(--surface-2); margin-top: 12px; overflow: hidden; }}
-  .xp-fill {{ height: 100%; border-radius: 5px; background: linear-gradient(90deg, var(--blurple), var(--cyan)); }}
+  .xp-fill {{ height: 100%; border-radius: 5px; background: var(--primary); }}
   .xp-caption {{ font-family: var(--font-mono); font-size: 10px; color: var(--muted); margin-top: 4px; text-align: right; }}
-  .reward-note {{ font-size: 11px; color: var(--cyan); margin-top: 10px; background: rgba(53,230,200,.08); border: 1px solid rgba(53,230,200,.25); border-radius: 10px; padding: 8px 10px; }}
+  .reward-note {{ font-size: 12px; color: var(--ink); margin-top: 10px; background: var(--primary-container); border-radius: 14px; padding: 10px 12px; }}
 
   /* --- rating meter --- */
   .rating-overview {{ display: flex; gap: 22px; align-items: center; }}
   .rating-big {{ text-align: center; min-width: 84px; }}
   .rating-big .num {{ font-family: var(--font-display); font-size: 38px; font-weight: 700; }}
-  .rating-big .stars {{ color: var(--cyan); font-size: 14px; margin: 2px 0; }}
+  .rating-big .stars {{ color: var(--primary); font-size: 14px; margin: 2px 0; }}
   .rating-big .count {{ font-size: 11px; color: var(--muted); font-family: var(--font-mono); }}
   .meter {{ flex: 1; }}
   .meter-row {{ display: flex; align-items: center; gap: 8px; margin: 6px 0; }}
   .meter-row .n {{ font-family: var(--font-mono); font-size: 11px; color: var(--muted); width: 8px; }}
   .meter-row .track {{ flex: 1; height: 7px; background: var(--surface-2); border-radius: 4px; overflow: hidden; }}
-  .meter-row .fill {{ height: 100%; border-radius: 4px; background: linear-gradient(90deg, var(--blurple), var(--cyan)); }}
+  .meter-row .fill {{ height: 100%; border-radius: 4px; background: var(--primary); }}
 
   /* --- review form --- */
   .discord-login-btn {{
     display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%;
-    background: var(--blurple); color: #fff; border: none; border-radius: 12px; padding: 12px 0;
-    font-weight: 700; font-size: 14px; cursor: pointer; text-decoration: none; font-family: var(--font-body);
+    background: var(--primary); color: var(--on-primary); border: none; border-radius: 100px; padding: 13px 0;
+    font-weight: 500; font-size: 14px; cursor: pointer; text-decoration: none; font-family: var(--font-body);
+    box-shadow: var(--elev-1);
   }}
-  .discord-login-btn:hover {{ filter: brightness(1.1); }}
+  .discord-login-btn:hover {{ filter: brightness(1.06); }}
   .review-form {{ display: none; }}
   .review-form.active {{ display: block; }}
   .signed-in-as {{ display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }}
-  .signed-in-as img {{ width: 32px; height: 32px; border-radius: 10px; }}
+  .signed-in-as img {{ width: 32px; height: 32px; border-radius: 12px; }}
   .signed-in-as .name {{ font-size: 13px; }}
-  .signed-in-as .signout {{ margin-left: auto; font-size: 12px; color: var(--pink); cursor: pointer; }}
+  .signed-in-as .signout {{ margin-left: auto; font-size: 12px; color: var(--offline); cursor: pointer; }}
   .stars-picker {{ font-size: 30px; letter-spacing: 6px; margin: 4px 0 14px; user-select: none; }}
-  .stars-picker span {{ cursor: pointer; opacity: .3; transition: transform .1s; color: var(--cyan); }}
-  .stars-picker span.filled {{ opacity: 1; text-shadow: 0 0 10px rgba(53,230,200,.6); }}
+  .stars-picker span {{ cursor: pointer; opacity: .3; transition: transform .1s; color: var(--primary); }}
+  .stars-picker span.filled {{ opacity: 1; }}
   .stars-picker span:hover {{ transform: scale(1.15); }}
   textarea {{
     width: 100%; background: var(--surface-2); color: var(--ink);
-    border: 1px solid var(--outline); border-radius: 10px; padding: 10px 12px;
+    border: none; border-radius: 16px; padding: 12px 14px;
     font-size: 13px; font-family: var(--font-body); resize: vertical; min-height: 64px;
   }}
-  textarea:focus {{ outline: none; border-color: var(--cyan); }}
+  textarea:focus {{ outline: 2px solid var(--primary); }}
   button.submit {{
-    margin-top: 12px; width: 100%; padding: 12px; border: none; border-radius: 12px;
-    background: linear-gradient(90deg, var(--blurple), var(--violet)); color: #fff; font-weight: 700; font-size: 13px; cursor: pointer;
-    font-family: var(--font-body);
+    margin-top: 12px; width: 100%; padding: 13px; border: none; border-radius: 100px;
+    background: var(--primary); color: var(--on-primary); font-weight: 500; font-size: 14px; cursor: pointer;
+    font-family: var(--font-body); box-shadow: var(--elev-1);
   }}
-  button.submit:disabled {{ opacity: .35; cursor: not-allowed; }}
+  button.submit:disabled {{ opacity: .35; cursor: not-allowed; box-shadow: none; }}
   .form-msg {{ font-size: 12px; margin-top: 8px; min-height: 14px; }}
   .form-msg.error {{ color: var(--offline); }}
   .form-msg.ok {{ color: var(--online); }}
@@ -375,18 +370,18 @@ SHARED_HEAD = """<meta charset="UTF-8">
   /* --- reviews as chat bubbles --- */
   .review {{ display: flex; gap: 10px; padding: 12px 0; }}
   .avatar-circle {{
-    width: 32px; height: 32px; border-radius: 10px; flex-shrink: 0;
-    background: linear-gradient(135deg, var(--blurple), var(--pink));
+    width: 32px; height: 32px; border-radius: 12px; flex-shrink: 0;
+    background: var(--primary-container); color: var(--ink);
     display: flex; align-items: center; justify-content: center;
-    font-weight: 700; font-size: 13px; color: #fff; font-family: var(--font-display);
+    font-weight: 700; font-size: 13px; font-family: var(--font-display);
   }}
   .review-bubble {{
-    background: var(--surface-2); border-radius: 4px 14px 14px 14px; padding: 10px 12px; flex: 1; min-width: 0;
+    background: var(--surface-2); border-radius: 4px 18px 18px 18px; padding: 12px 14px; flex: 1; min-width: 0;
   }}
   .review-top {{ display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }}
-  .review-name {{ font-weight: 600; font-size: 13px; }}
+  .review-name {{ font-weight: 500; font-size: 13px; }}
   .review-date {{ font-size: 10px; color: var(--muted); font-family: var(--font-mono); }}
-  .review-stars {{ color: var(--cyan); font-size: 11px; margin: 4px 0; }}
+  .review-stars {{ color: var(--primary); font-size: 11px; margin: 4px 0; }}
   .review-comment {{ font-size: 13px; color: var(--ink); line-height: 1.5; word-wrap: break-word; }}
   .empty-note {{ color: var(--muted); font-size: 13px; text-align: center; padding: 12px 0; }}
 
