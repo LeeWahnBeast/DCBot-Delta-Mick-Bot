@@ -4,7 +4,7 @@ Lớp lưu trữ duy nhất của bot: Firebase Realtime Database (RTDB), qua RE
 Gộp toàn bộ thao tác đọc/ghi dữ liệu bền vững ở đây:
 - bot_state    : last_video_id, was_live, last_identity_avatar_url (thay cho data.json cũ)
 - videos       : trạng thái "đã thông báo" (notified) của từng video TikTok
-- users        : MICK, XP, level, ngày nhận Daily gần nhất
+- users        : MICK, XP, level, ngày nhận Daily gần nhất, chuỗi Daily (streak/history)
 - daily        : mốc thời gian bắt đầu chu kỳ Daily hiện tại (để tính giảm dần theo giờ)
 - site         : lượt xem + rating (sao) của web dashboard
 - businesses   : minigame kinh doanh
@@ -344,6 +344,9 @@ DEFAULT_USER = {
     "level": 0,
     "last_xp_at": 0,
     "last_daily_date": "",
+    "last_active_date": "",  # ngày (VN) gần nhất user nhắn tin - dùng tính chuỗi Daily (xem features.py)
+    "daily_streak": 0,  # số ngày liên tiếp đã nhận Daily (không tính ngày "tạm ngưng" vì offline)
+    "daily_history": [],  # list[str] "done"/"missed"/"paused", tối đa DAILY_STREAK_HISTORY_LEN ngày gần nhất
     "atm_balance": 0,
     "achievements": [],  # list[str] id thành tựu đã mở
     "quest_date": "",
@@ -599,9 +602,20 @@ async def get_site_stats() -> dict:
     doc = await _get_doc("site", "dashboard")
 
     ratings = doc.get("ratings", {}) or {}
-    count = len(ratings)
+    if not isinstance(ratings, dict):
+        # Firebase RTDB có thể trả về LIST thay vì object nếu (hiếm khi) toàn
+        # bộ key con là số nguyên liên tiếp -> chuẩn hoá lại thành dict rỗng
+        # bỏ qua phần tử None, tránh crash count/avg bên dưới.
+        ratings = {i: v for i, v in enumerate(ratings) if v is not None}
+
     # ratings cũ (trước khi có tên/comment) lưu trực tiếp là int stars -> vẫn đọc được
-    stars_values = [r["stars"] if isinstance(r, dict) else r for r in ratings.values()]
+    stars_values = []
+    for r in ratings.values():
+        try:
+            stars_values.append(r["stars"] if isinstance(r, dict) else int(r))
+        except Exception:
+            continue
+    count = len(stars_values)
     avg = round(sum(stars_values) / count, 2) if count else 0.0
     result = {"views": doc.get("views", 0), "rating_count": count, "rating_avg": avg}
 
@@ -616,10 +630,15 @@ async def get_rating_distribution() -> dict[int, int]:
     doc = await _get_doc("site", "dashboard")
 
     ratings = doc.get("ratings", {}) or {}
+    if not isinstance(ratings, dict):
+        ratings = {i: v for i, v in enumerate(ratings) if v is not None}
     dist = {i: 0 for i in range(1, 6)}
     for r in ratings.values():
-        stars = r["stars"] if isinstance(r, dict) else r
-        stars = max(1, min(5, int(stars)))
+        try:
+            stars = r["stars"] if isinstance(r, dict) else r
+            stars = max(1, min(5, int(stars)))
+        except Exception:
+            continue
         dist[stars] += 1
     return dist
 
@@ -630,6 +649,8 @@ async def get_reviews(limit: int = 30) -> list[dict]:
     doc = await _get_doc("site", "dashboard")
 
     ratings = doc.get("ratings", {}) or {}
+    if not isinstance(ratings, dict):
+        ratings = {i: v for i, v in enumerate(ratings) if v is not None}
     reviews = [r for r in ratings.values() if isinstance(r, dict) and r.get("name") and r.get("comment")]
     reviews.sort(key=lambda r: r.get("ts", 0), reverse=True)
     return reviews[:limit]
