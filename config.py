@@ -13,8 +13,8 @@ TIKTOK_USERNAME = os.environ.get("TIKTOK_USERNAME", "tahnuyo_0").lstrip("@")
 NOTIFY_MENTION = os.environ.get("NOTIFY_MENTION", "<@&1534358042496335942>")
 CHECK_INTERVAL_SEC = int(os.environ.get("CHECK_INTERVAL_SEC", "120"))
 
-# Kênh đăng embed Daily hàng ngày (mặc định dùng chung kênh thông báo TikTok)
-DAILY_CHANNEL_ID = int(os.environ.get("DAILY_CHANNEL_ID", "0") or 0) or DISCORD_CHANNEL_ID
+# Kênh đăng embed Daily hàng ngày (mặc định kênh riêng, khác kênh thông báo TikTok)
+DAILY_CHANNEL_ID = int(os.environ.get("DAILY_CHANNEL_ID", "0") or 0) or 1528590477073584138
 
 # Đồng bộ avatar bot + icon/tên server theo TikTok mỗi 5 tiếng (18000s).
 IDENTITY_SYNC_INTERVAL_SEC = int(os.environ.get("IDENTITY_SYNC_INTERVAL_SEC", str(5 * 3600)))

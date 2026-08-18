@@ -255,25 +255,34 @@ async def _handle_new_video(profile: dict, channel):
     if latest_id == bot_state.get("last_video_id"):
         return  # không có video mới
 
-    is_first_run = not bot_state.get("last_video_id")
     await db.save_bot_state({"last_video_id": latest_id})
 
     existing = await db.get_video(latest_id)
+    if existing and existing.get("notified"):
+        return  # đã gửi thông báo cho video này rồi (vd. bot_state vừa mất do restart)
+
     if not existing:
+        # "First run thật sự" = TOÀN BỘ DB chưa từng ghi nhận video nào (kể
+        # cả video khác) - chỉ trường hợp này mới bỏ qua thông báo, để tránh
+        # ping video cũ khi mới deploy bot lần đầu tiên trong lịch sử.
+        #
+        # QUAN TRỌNG: không được dùng bot_state.last_video_id để xác định
+        # "first run" (như code cũ) - giá trị đó có thể mất khi bot restart
+        # (Firebase lỗi tạm thời/dùng bộ nhớ RAM dự phòng), khiến 1 video
+        # MỚI THẬT bị hiểu nhầm thành "video cũ đã biết" và bị âm thầm đánh
+        # dấu notified=True mà KHÔNG hề gửi thông báo - đây là bug đã xảy ra.
+        is_true_first_run = not await db.has_any_video()
         await db.save_video(
             latest_id,
             {
-                "notified": False,
+                "notified": is_true_first_run,
                 "username": TIKTOK_USERNAME,
                 "create_time": profile.get("latest_video_create_time"),
                 "first_seen_at": int(time.time()),
             },
         )
-
-    if is_first_run:
-        # Deploy lần đầu -> chỉ đánh dấu đã biết, không ping video cũ.
-        await db.save_video(latest_id, {"notified": True})
-        return
+        if is_true_first_run:
+            return
 
     if channel is None:
         return  # notified vẫn False -> vòng lặp sau sẽ retry

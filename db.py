@@ -345,6 +345,23 @@ async def get_unnotified_video_ids(limit: int = 5) -> list[str]:
         return []
 
 
+async def has_any_video() -> bool:
+    """Có ít nhất 1 video từng được ghi nhận trong DB chưa - dùng để phân
+    biệt CHÍNH XÁC 'bot mới deploy lần đầu tiên trong lịch sử' (nên bỏ qua
+    video đang có sẵn, không ping video cũ) với 'bot vừa restart và mất
+    bot_state tạm thời' (KHÔNG được bỏ qua, video mới vẫn phải thông báo).
+    Xem discord_bot.py: _handle_new_video()."""
+    if _use_memory_fallback:
+        return any(key.startswith("videos/") for key in _memory_store)
+    try:
+        params = {"limitToFirst": 1}
+        data, ok = await _rtdb_request("GET", "videos", params=params)
+        return bool(ok and data)
+    except Exception as e:
+        _warn_throttled("kiểm tra có video nào chưa", str(e))
+        return False
+
+
 # ---------------------------------------------------------------------------
 # invite_codes: map link mời (Discord invite code) do bot TỰ TẠO cho quest
 # "mời bạn bè" -> user sở hữu link đó. Dùng để xác định chính xác ai vừa được
