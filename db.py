@@ -15,6 +15,7 @@ lớp fallback lưu tạm trong RAM, để không bị crash khi test ở máy l
 import json
 import os
 import tempfile
+import time as _time_lib
 import uuid as _uuid_lib
 
 from config import FIREBASE_CREDENTIALS_JSON, FIRESTORE_PROJECT_ID, log
@@ -22,6 +23,38 @@ from config import FIREBASE_CREDENTIALS_JSON, FIRESTORE_PROJECT_ID, log
 _client = None
 _use_memory_fallback = False
 _memory_store: dict = {}
+
+# ---------------------------------------------------------------------------
+# Chống spam log + crash khi Firestore hết quota (free tier: 50k đọc/20k ghi
+# mỗi ngày). Khi bị 429 RESOURCE_EXHAUSTED, thay vì để exception bay lên làm
+# vỡ task nền (xem log Render), ta log CẢNH BÁO 1 LẦN MỖI 5 PHÚT rồi trả về
+# rỗng/ bỏ qua ghi, để bot vẫn chạy tiếp (chỉ tạm mất vài lượt ghi, không sập).
+# ---------------------------------------------------------------------------
+_last_quota_warn_ts = 0.0
+_QUOTA_WARN_INTERVAL_SEC = 300
+
+
+def _is_quota_error(e: Exception) -> bool:
+    try:
+        from google.api_core.exceptions import ResourceExhausted
+
+        if isinstance(e, ResourceExhausted):
+            return True
+    except ImportError:
+        pass
+    return "RESOURCE_EXHAUSTED" in str(e) or "Quota exceeded" in str(e)
+
+
+def _warn_quota_throttled(action: str, e: Exception) -> None:
+    global _last_quota_warn_ts
+    now = _time_lib.time()
+    if now - _last_quota_warn_ts >= _QUOTA_WARN_INTERVAL_SEC:
+        _last_quota_warn_ts = now
+        log.warning(
+            "Firestore hết quota khi %s (%s) - bot vẫn chạy tiếp, dữ liệu tạm "
+            "thời bỏ qua thao tác này. Cảnh báo này bị giới hạn 1 lần/5 phút.",
+            action, e,
+        )
 
 
 def _init_client():
@@ -60,8 +93,14 @@ _init_client()
 async def _get_doc(collection: str, doc_id: str) -> dict:
     if _use_memory_fallback:
         return dict(_memory_store.get(f"{collection}/{doc_id}", {}))
-    snap = await _client.collection(collection).document(doc_id).get()
-    return snap.to_dict() or {} if snap.exists else {}
+    try:
+        snap = await _client.collection(collection).document(doc_id).get()
+        return snap.to_dict() or {} if snap.exists else {}
+    except Exception as e:
+        if _is_quota_error(e):
+            _warn_quota_throttled(f"đọc {collection}/{doc_id}", e)
+            return {}
+        raise
 
 
 async def _set_doc(collection: str, doc_id: str, data: dict, merge: bool = True) -> None:
@@ -72,7 +111,13 @@ async def _set_doc(collection: str, doc_id: str, data: dict, merge: bool = True)
         else:
             _memory_store[key] = dict(data)
         return
-    await _client.collection(collection).document(doc_id).set(data, merge=merge)
+    try:
+        await _client.collection(collection).document(doc_id).set(data, merge=merge)
+    except Exception as e:
+        if _is_quota_error(e):
+            _warn_quota_throttled(f"ghi {collection}/{doc_id}", e)
+            return
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +320,42 @@ async def get_word(word: str) -> dict:
 async def save_word(word: str, data: dict) -> None:
     global _learned_words_cache
     await _set_doc("ai_words", word.lower(), data, merge=True)
+    _learned_words_cache = None
+
+
+async def bump_word_counts(counts: dict[str, int], last_seen: dict[str, int]) -> None:
+    """Tăng tần suất cho NHIỀU từ cùng lúc, gộp thành 1 lượt ghi (Firestore
+    Increment - không cần đọc trước, và dùng WriteBatch - 1 lần gọi mạng cho
+    cả batch). Dùng thay cho get_word()+save_word() gọi riêng từng từ, vốn tốn
+    2 lượt quota Firestore (1 đọc + 1 ghi) cho MỖI từ lạ trong MỖI tin nhắn -
+    đây chính là nguyên nhân hết quota free tier khi chat đông người.
+    """
+    global _learned_words_cache
+    if not counts:
+        return
+
+    if _use_memory_fallback:
+        for word, delta in counts.items():
+            key = f"ai_words/{word}"
+            doc = _memory_store.setdefault(key, {})
+            doc["count"] = doc.get("count", 0) + delta
+            doc["last_seen"] = last_seen.get(word, doc.get("last_seen", 0))
+        _learned_words_cache = None
+        return
+
+    try:
+        from google.cloud import firestore as fs
+
+        batch = _client.batch()
+        for word, delta in counts.items():
+            ref = _client.collection("ai_words").document(word)
+            batch.set(ref, {"count": fs.Increment(delta), "last_seen": last_seen.get(word, 0)}, merge=True)
+        await batch.commit()
+    except Exception as e:
+        if _is_quota_error(e):
+            _warn_quota_throttled(f"cập nhật {len(counts)} từ học", e)
+            return
+        raise
     _learned_words_cache = None
 
 

@@ -3,8 +3,9 @@ Discord Client: thông báo TikTok (video/live, có retry nếu gửi lỗi), đ
 avatar bot + icon/tên server mỗi 5 tiếng, hệ thống MICK + Level (XP theo tin
 nhắn VÀ theo voice chat), Daily hàng ngày (0h-7h giờ VN), 3 minigame có ID
 riêng và nhập liệu qua Modal (Wordle, Đoán số, Kéo Búa Bao), thành tựu, quest
-hằng ngày, kinh doanh, ATM, chuyển MICK, AI chat. Toàn bộ lệnh slash dùng tên
-tiếng Việt có dấu.
+hằng ngày, kinh doanh, ATM, chuyển MICK, AI chat. Tên lệnh slash đăng ký bằng
+tiếng Anh (yêu cầu kỹ thuật của Discord), mô tả/nội dung hiển thị bằng tiếng
+Việt - xem _HELP_CATEGORIES bên dưới, PHẢI khớp đúng tên lệnh thật khi sửa.
 
 Toàn bộ dữ liệu bền vững (video đã báo, level/MICK, mốc Daily...) lưu ở
 Firestore qua module db.py, không còn phụ thuộc file JSON local (ổ đĩa Render
@@ -98,6 +99,8 @@ async def on_ready():
         ai_auto_chat_loop.start()
     if not voice_xp_loop.is_running():
         voice_xp_loop.start()
+    if not learn_word_flush_loop.is_running():
+        learn_word_flush_loop.start()
 
 
 def get_bot_info() -> dict:
@@ -463,6 +466,36 @@ async def before_voice_xp_loop():
     await client.wait_until_ready()
 
 
+# Gộp việc ghi "từ học được" (ai_words) thành từng đợt 3 phút/lần thay vì ghi
+# Firestore mỗi tin nhắn - đây là fix cho lỗi 429 RESOURCE_EXHAUSTED (hết quota
+# Firestore free tier) khi server chat đông người.
+@tasks.loop(seconds=180)
+async def learn_word_flush_loop():
+    try:
+        await ai_chat.flush_learned_words()
+    except Exception as e:
+        log.warning("Flush từ học định kỳ lỗi: %s", e)
+
+
+@learn_word_flush_loop.before_loop
+async def before_learn_word_flush_loop():
+    await client.wait_until_ready()
+
+
+def _fire_and_forget(coro, err_label: str):
+    """Chạy 1 coroutine nền (asyncio.create_task) nhưng bắt lỗi thay vì để bay
+    lên thành exception không ai xử lý (unhandled task exception) - vốn làm
+    spam traceback trong log và có thể che mất lỗi thật khác."""
+
+    async def _runner():
+        try:
+            await coro
+        except Exception as e:
+            log.warning("%s: %s", err_label, e)
+
+    return asyncio.create_task(_runner())
+
+
 async def _announce_level_up(member: discord.Member, result: dict):
     """Thông báo lên level (dùng chung cho XP nhắn tin lẫn XP voice chat)."""
     channel = await _get_channel()
@@ -520,15 +553,16 @@ async def on_message(message: discord.Message):
         if trigger in lowered:
             await _bump_quest_and_notify(message, qid)
 
-    # Học từ mới trong server (không chặn xử lý chính)
-    asyncio.create_task(ai_chat.learn_from_message(content))
+    # Học từ mới trong server (không chặn xử lý chính, chỉ cộng dồn vào RAM -
+    # xem learn_word_flush_loop để biết khi nào thật sự ghi Firestore)
+    _fire_and_forget(ai_chat.learn_from_message(content), "Học từ lỗi")
 
     # Thành tựu: tin nhắn đầu tiên
     asyncio.create_task(_check_first_message_achievement(message))
 
     # AI Chat: reply hoặc tag bot
     if ai_chat.wants_bot_reply(message, client.user):
-        asyncio.create_task(_handle_ai_reply(message))
+        _fire_and_forget(_handle_ai_reply(message), "AI reply lỗi")
 
     _maybe_grant_xp(message)
 
@@ -1611,10 +1645,11 @@ _HELP_CATEGORIES = [
         "label": "Level & Kinh tế",
         "emoji": "📊",
         "commands": [
-            ("/profile [thành_viên]", "Hồ sơ · Level card ảnh · Rank · UUID · ngày tham gia — bấm nút để chuyển view"),
-            ("/bảng-xếp-hạng [loại]", "Bảng xếp hạng Level hoặc MICK Coin"),
-            ("/atm [hành_động] [số_tiền]", "Gửi/rút MICK vào ATM, hoặc xem số dư"),
-            ("/chuyển-tiền [người_nhận] [số_tiền]", "Chuyển MICK cho người khác (cần xác minh mã OTP gửi qua DM)"),
+            ("/profile [thanh_vien]", "Hồ sơ · Level card ảnh · Rank · UUID · ngày tham gia — bấm nút để chuyển view"),
+            ("/level [thanh_vien]", "Xem riêng level card ảnh (Material You 3) của bạn hoặc người khác"),
+            ("/leaderboard [loai]", "Bảng xếp hạng theo Level hoặc theo MICK Coin"),
+            ("/atm [hanh_dong] [so_tien]", "Gửi/rút MICK vào ATM, hoặc xem số dư"),
+            ("/transfer-money [nguoi_nhan] [so_tien]", "Chuyển MICK cho người khác (cần xác minh mã OTP gửi qua DM)"),
         ],
     },
     {
@@ -1622,10 +1657,10 @@ _HELP_CATEGORIES = [
         "label": "Minigame & Quest",
         "emoji": "🎮",
         "commands": [
-            ("/trò-chơi", "Chơi Wordle · Đoán số · Kéo Búa Bao · Trivia · 🎲 Tài Xỉu · 🃏 Xì Dách (2 game cuối cược MICK thật)"),
-            ("/check-game [id_ván]", "Tra thông tin/trạng thái 1 ván minigame theo ID riêng"),
-            ("/nhiệm-vụ", "Xem quest hằng ngày của bạn"),
-            ("/thành-tựu", "Xem danh sách thành tựu"),
+            ("/game", "Chơi Wordle · Đoán số · Kéo Búa Bao · Trivia · 🎲 Tài Xỉu · 🃏 Xì Dách (2 game cuối cược MICK thật)"),
+            ("/check-game [id_van]", "Tra thông tin/trạng thái 1 ván minigame theo ID riêng"),
+            ("/quest", "Xem quest hằng ngày của bạn"),
+            ("/achievements", "Xem danh sách thành tựu"),
         ],
     },
     {
@@ -1633,7 +1668,7 @@ _HELP_CATEGORIES = [
         "label": "Kinh doanh",
         "emoji": "💼",
         "commands": [
-            ("/kinh-doanh", "Xem cơ ngơi · Mở cơ sở mới · Thuê nhân viên — bấm nút"),
+            ("/business", "Xem cơ ngơi · Mở cơ sở mới · Thuê nhân viên — bấm nút"),
         ],
     },
     {
@@ -1641,8 +1676,8 @@ _HELP_CATEGORIES = [
         "label": "AI & Từ điển",
         "emoji": "🤖",
         "commands": [
-            ("/hỏi-ai [nội_dung]", "Chat trực tiếp với AI của bot"),
-            ("/từ-điển", "Tra từ hoặc dạy bot nghĩa từ mới — bấm nút, nhập qua form"),
+            ("/ask-ai [noi_dung]", "Chat trực tiếp với AI của bot"),
+            ("/dictionary", "Tra từ hoặc dạy bot nghĩa từ mới — bấm nút, nhập qua form"),
         ],
     },
 ]

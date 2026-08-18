@@ -1,6 +1,7 @@
 """
-Web server cho Render health-check + trang "cửa hàng ứng dụng" của bot, thiết
-kế mô phỏng Google Play Store:
+Web server cho Render health-check + trang "thẻ bot" (bot card) dạng dashboard
+tối màu, phong cách gaming/Discord riêng cho bot (không còn mô phỏng Google
+Play Store như bản cũ):
 - Icon/tên bot lấy TRỰC TIẾP từ token đang đăng nhập (discord_bot.client.user),
   không hardcode -> đổi avatar/tên bot trên Discord là trang web tự cập nhật.
 - Ngày tạo tài khoản bot suy ra từ Discord snowflake ID, trạng thái hoạt động
@@ -93,148 +94,208 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{bot_name} - Google Play</title>
+<title>{bot_name} · Bot Card</title>
+<link rel="icon" href="data:,">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
   :root {{
     color-scheme: dark;
-    --bg: #0f1115; --surface: #1b1e24; --surface-2: #22262e;
-    --on-surface: #e8eaed; --on-surface-variant: #9aa0a6;
-    --primary: #8ab4f8; --outline: #3c4043; --star: #ffb300;
+    --bg: #0a0b10; --surface: #14161d; --surface-2: #1c1f29;
+    --ink: #f2f3f8; --muted: #8991a6; --outline: #262a35;
+    --gold: #ffb64d; --pink: #ff4d94; --online: #4ade80; --offline: #f87171;
+    --font-display: "Space Grotesk", sans-serif;
+    --font-body: "Inter", "Segoe UI", sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, monospace;
   }}
   * {{ box-sizing: border-box; }}
   body {{
-    margin: 0; background: var(--bg); color: var(--on-surface);
-    font-family: Roboto, "Segoe UI", system-ui, sans-serif;
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--font-body);
     display: flex; justify-content: center;
   }}
   .wrap {{ width: 100%; max-width: 480px; padding-bottom: 60px; }}
+  a {{ color: inherit; }}
+  :focus-visible {{ outline: 2px solid var(--gold); outline-offset: 2px; }}
 
-  .topbar {{ display: flex; align-items: center; gap: 16px; padding: 14px 16px; }}
-  .topbar .back {{ font-size: 20px; color: var(--on-surface-variant); }}
+  /* --- top tag --- */
+  .topbar {{ display: flex; justify-content: space-between; align-items: center; padding: 18px 20px 4px; }}
+  .tag {{
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--muted); border: 1px solid var(--outline); border-radius: 100px; padding: 4px 10px;
+  }}
 
-  .app-header {{ display: flex; gap: 16px; padding: 8px 16px 20px; align-items: flex-start; }}
-  .app-icon {{
-    width: 72px; height: 72px; border-radius: 16px; object-fit: cover; flex-shrink: 0;
+  /* --- hero player card --- */
+  .hero {{ display: flex; flex-direction: column; align-items: center; text-align: center; padding: 20px 20px 8px; }}
+  .avatar-ring {{
+    width: 96px; height: 96px; border-radius: 28px; padding: 3px;
+    background: conic-gradient(from 0deg, var(--gold), var(--pink), var(--gold));
+    animation: spin 6s linear infinite;
+  }}
+  @media (prefers-reduced-motion: reduce) {{ .avatar-ring {{ animation: none; }} }}
+  @keyframes spin {{ to {{ transform: rotate(360deg); }} }}
+  .avatar-ring img {{
+    width: 100%; height: 100%; border-radius: 25px; object-fit: cover; display: block;
     background: var(--surface-2);
   }}
-  .app-meta h1 {{ font-size: 20px; margin: 0 0 4px; font-weight: 500; }}
-  .app-meta .dev {{ color: var(--primary); font-size: 13px; margin: 0 0 2px; }}
-  .app-meta .cat {{ color: var(--on-surface-variant); font-size: 12px; margin: 0; }}
+  .hero h1 {{
+    font-family: var(--font-display); font-weight: 700; font-size: 24px; margin: 14px 0 2px;
+  }}
+  .hero .dev {{ color: var(--muted); font-size: 13px; margin: 0; }}
+  .status-chip {{
+    display: inline-flex; align-items: center; gap: 6px; margin-top: 10px;
+    font-family: var(--font-mono); font-size: 11px; padding: 5px 12px; border-radius: 100px;
+    background: var(--surface-2); border: 1px solid var(--outline);
+  }}
+  .status-chip .dot {{ width: 7px; height: 7px; border-radius: 50%; }}
+  .status-chip .dot.on {{ background: var(--online); box-shadow: 0 0 8px var(--online); }}
+  .status-chip .dot.off {{ background: var(--offline); }}
 
-  .btn-row {{ display: flex; gap: 10px; padding: 4px 16px 20px; }}
+  .btn-row {{ display: flex; gap: 10px; padding: 18px 20px 4px; }}
   .btn-pill {{
-    flex: 1; text-align: center; padding: 10px 0; border-radius: 100px; font-size: 14px;
-    font-weight: 600; cursor: pointer; border: none;
+    flex: 1; text-align: center; padding: 11px 0; border-radius: 12px; font-size: 14px;
+    font-weight: 600; cursor: pointer; border: none; font-family: var(--font-body);
   }}
-  .btn-pill.primary {{ background: var(--primary); color: #062e6f; }}
-  .btn-pill.outline {{ background: transparent; color: var(--primary); border: 1px solid var(--outline); }}
+  .btn-pill.primary {{ background: var(--gold); color: #241300; }}
+  .btn-pill.outline {{ background: transparent; color: var(--ink); border: 1px solid var(--outline); }}
+  .btn-pill.primary:hover {{ filter: brightness(1.08); }}
+  .btn-pill.outline:hover {{ border-color: var(--gold); color: var(--gold); }}
 
-  .quickstats {{ display: flex; justify-content: space-around; padding: 12px 16px 22px; text-align: center; border-bottom: 1px solid var(--outline); }}
-  .quickstats .qs .val {{ font-size: 15px; font-weight: 600; }}
-  .quickstats .qs .val .star {{ color: var(--star); }}
-  .quickstats .qs .label {{ font-size: 11px; color: var(--on-surface-variant); margin-top: 2px; }}
+  /* --- scoreboard strip --- */
+  .scoreboard {{ display: flex; gap: 10px; padding: 18px 20px 4px; }}
+  .score-block {{
+    flex: 1; background: var(--surface); border-radius: 12px; padding: 12px 10px;
+    text-align: center; position: relative; overflow: hidden;
+  }}
+  .score-block::before {{
+    content: ""; position: absolute; top: 0; left: 0; right: 0; height: 3px;
+    background: linear-gradient(90deg, var(--gold), var(--pink));
+  }}
+  .score-block .val {{ font-family: var(--font-mono); font-weight: 600; font-size: 17px; }}
+  .score-block .val .star {{ color: var(--gold); }}
+  .score-block .label {{ font-size: 10px; color: var(--muted); margin-top: 4px; text-transform: uppercase; letter-spacing: .06em; }}
 
-  .section {{ padding: 20px 16px; border-bottom: 1px solid var(--outline); }}
-  .section h2 {{ font-size: 16px; font-weight: 500; margin: 0 0 12px; }}
+  /* --- panel --- */
+  .panel {{ margin: 18px 20px 0; background: var(--surface); border-radius: 16px; padding: 18px; position: relative; overflow: hidden; }}
+  .panel::before {{
+    content: ""; position: absolute; top: 0; left: 18px; right: 18px; height: 2px;
+    background: linear-gradient(90deg, var(--gold), transparent 70%);
+  }}
+  .panel h2 {{ font-family: var(--font-display); font-size: 15px; font-weight: 700; margin: 4px 0 14px; }}
   .row {{ display: flex; align-items: center; justify-content: space-between; }}
-  .muted {{ color: var(--on-surface-variant); font-size: 13px; }}
+  .muted {{ color: var(--muted); font-size: 13px; }}
 
-  .info-line {{ display: flex; justify-content: space-between; padding: 8px 0; font-size: 13px; }}
-  .info-line .k {{ color: var(--on-surface-variant); }}
-  .dot-online {{ color: #81c995; }}
-  .dot-offline {{ color: #f28b82; }}
+  .info-line {{ display: flex; justify-content: space-between; padding: 7px 0; font-size: 13px; }}
+  .info-line .k {{ color: var(--muted); }}
+  .info-line .v {{ font-family: var(--font-mono); }}
+  .dot-online {{ color: var(--online); }}
+  .dot-offline {{ color: var(--offline); }}
 
-  .rating-overview {{ display: flex; gap: 24px; align-items: center; }}
-  .rating-big {{ text-align: center; min-width: 90px; }}
-  .rating-big .num {{ font-size: 40px; font-weight: 400; }}
-  .rating-big .stars {{ color: var(--star); font-size: 14px; margin: 2px 0; }}
-  .rating-big .count {{ font-size: 12px; color: var(--on-surface-variant); }}
-  .dist {{ flex: 1; }}
-  .dist-row {{ display: flex; align-items: center; gap: 8px; margin: 5px 0; }}
-  .dist-row .n {{ font-size: 11px; color: var(--on-surface-variant); width: 10px; }}
-  .dist-row .bar-track {{ flex: 1; height: 6px; background: var(--surface-2); border-radius: 4px; overflow: hidden; }}
-  .dist-row .bar-fill {{ height: 100%; background: var(--on-surface-variant); border-radius: 4px; }}
+  /* --- rating meter --- */
+  .rating-overview {{ display: flex; gap: 22px; align-items: center; }}
+  .rating-big {{ text-align: center; min-width: 84px; }}
+  .rating-big .num {{ font-family: var(--font-display); font-size: 38px; font-weight: 700; }}
+  .rating-big .stars {{ color: var(--gold); font-size: 14px; margin: 2px 0; }}
+  .rating-big .count {{ font-size: 11px; color: var(--muted); font-family: var(--font-mono); }}
+  .meter {{ flex: 1; }}
+  .meter-row {{ display: flex; align-items: center; gap: 8px; margin: 6px 0; }}
+  .meter-row .n {{ font-family: var(--font-mono); font-size: 11px; color: var(--muted); width: 8px; }}
+  .meter-row .track {{ flex: 1; height: 7px; background: var(--surface-2); border-radius: 4px; overflow: hidden; }}
+  .meter-row .fill {{ height: 100%; border-radius: 4px; background: linear-gradient(90deg, var(--gold), var(--pink)); }}
 
-  .review {{ padding: 16px 0; border-bottom: 1px solid var(--outline); }}
-  .review:last-child {{ border-bottom: none; }}
-  .review-top {{ display: flex; align-items: center; gap: 10px; }}
-  .avatar-circle {{
-    width: 34px; height: 34px; border-radius: 50%; background: var(--surface-2);
-    display: flex; align-items: center; justify-content: center; font-weight: 600; font-size: 14px; flex-shrink: 0;
-  }}
-  .review-name {{ font-weight: 500; font-size: 13px; }}
-  .review-date {{ font-size: 11px; color: var(--on-surface-variant); margin-top: 1px; }}
-  .review-stars {{ color: var(--star); font-size: 12px; margin: 6px 0 6px 44px; }}
-  .review-comment {{ font-size: 13px; color: var(--on-surface); margin-left: 44px; line-height: 1.5; }}
-  .empty-note {{ color: var(--on-surface-variant); font-size: 13px; text-align: center; padding: 12px 0; }}
-
-  /* --- form đánh giá --- */
+  /* --- review form --- */
   .gsi-wrap {{ margin-bottom: 14px; }}
   .review-form {{ display: none; }}
   .review-form.active {{ display: block; }}
   .signed-in-as {{ display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }}
-  .signed-in-as img {{ width: 32px; height: 32px; border-radius: 50%; }}
+  .signed-in-as img {{ width: 32px; height: 32px; border-radius: 10px; }}
   .signed-in-as .name {{ font-size: 13px; }}
-  .signed-in-as .signout {{ margin-left: auto; font-size: 12px; color: var(--primary); cursor: pointer; }}
+  .signed-in-as .signout {{ margin-left: auto; font-size: 12px; color: var(--pink); cursor: pointer; }}
   .stars-picker {{ font-size: 30px; letter-spacing: 6px; margin: 4px 0 14px; user-select: none; }}
-  .stars-picker span {{ cursor: pointer; opacity: .3; transition: transform .1s; }}
-  .stars-picker span.filled {{ opacity: 1; color: var(--star); }}
+  .stars-picker span {{ cursor: pointer; opacity: .3; transition: transform .1s; color: var(--gold); }}
+  .stars-picker span.filled {{ opacity: 1; text-shadow: 0 0 10px rgba(255,182,77,.6); }}
   .stars-picker span:hover {{ transform: scale(1.15); }}
   textarea {{
-    width: 100%; background: var(--surface-2); color: var(--on-surface);
+    width: 100%; background: var(--surface-2); color: var(--ink);
     border: 1px solid var(--outline); border-radius: 10px; padding: 10px 12px;
-    font-size: 13px; font-family: inherit; resize: vertical; min-height: 64px;
+    font-size: 13px; font-family: var(--font-body); resize: vertical; min-height: 64px;
   }}
-  textarea:focus {{ outline: none; border-color: var(--primary); }}
+  textarea:focus {{ outline: none; border-color: var(--gold); }}
   button.submit {{
-    margin-top: 12px; width: 100%; padding: 12px; border: none; border-radius: 100px;
-    background: var(--primary); color: #062e6f; font-weight: 600; font-size: 13px; cursor: pointer;
+    margin-top: 12px; width: 100%; padding: 12px; border: none; border-radius: 12px;
+    background: var(--gold); color: #241300; font-weight: 700; font-size: 13px; cursor: pointer;
+    font-family: var(--font-body);
   }}
-  button.submit:disabled {{ opacity: .4; cursor: not-allowed; }}
+  button.submit:disabled {{ opacity: .35; cursor: not-allowed; }}
   .form-msg {{ font-size: 12px; margin-top: 8px; min-height: 14px; }}
-  .form-msg.error {{ color: #f28b82; }}
-  .form-msg.ok {{ color: #81c995; }}
+  .form-msg.error {{ color: var(--offline); }}
+  .form-msg.ok {{ color: var(--online); }}
 
-  .footer {{ font-size: 11px; color: var(--on-surface-variant); text-align: center; padding: 20px 16px 0; }}
+  /* --- reviews as chat bubbles --- */
+  .review {{ display: flex; gap: 10px; padding: 12px 0; }}
+  .avatar-circle {{
+    width: 32px; height: 32px; border-radius: 10px; flex-shrink: 0;
+    background: linear-gradient(135deg, var(--gold), var(--pink));
+    display: flex; align-items: center; justify-content: center;
+    font-weight: 700; font-size: 13px; color: #1a0d00; font-family: var(--font-display);
+  }}
+  .review-bubble {{
+    background: var(--surface-2); border-radius: 4px 14px 14px 14px; padding: 10px 12px; flex: 1; min-width: 0;
+  }}
+  .review-top {{ display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }}
+  .review-name {{ font-weight: 600; font-size: 13px; }}
+  .review-date {{ font-size: 10px; color: var(--muted); font-family: var(--font-mono); }}
+  .review-stars {{ color: var(--gold); font-size: 11px; margin: 4px 0; }}
+  .review-comment {{ font-size: 13px; color: var(--ink); line-height: 1.5; word-wrap: break-word; }}
+  .empty-note {{ color: var(--muted); font-size: 13px; text-align: center; padding: 12px 0; }}
+
+  .footer {{
+    font-family: var(--font-mono); font-size: 10px; color: var(--muted); text-align: center; padding: 22px 16px 0;
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+  }}
+  .footer .pulse {{ width: 6px; height: 6px; border-radius: 50%; background: var(--online); }}
+  @media (prefers-reduced-motion: no-preference) {{
+    .footer .pulse {{ animation: pulse 2s ease-in-out infinite; }}
+  }}
+  @keyframes pulse {{ 0%,100% {{ opacity: 1; }} 50% {{ opacity: .3; }} }}
 </style>
 </head>
 <body>
 <div class="wrap">
 
-  <div class="topbar"><span class="back">&larr;</span></div>
+  <div class="topbar"><span class="tag">TikTok · Discord Bot</span></div>
 
-  <div class="app-header">
-    <img class="app-icon" id="app-icon" src="" alt="icon">
-    <div class="app-meta">
-      <h1 id="app-name">Đang tải...</h1>
-      <p class="dev">{owner_name}</p>
-      <p class="cat">Discord Bot</p>
-    </div>
+  <div class="hero">
+    <div class="avatar-ring"><img id="app-icon" src="" alt="icon"></div>
+    <h1 id="app-name">Đang tải...</h1>
+    <p class="dev">bởi {owner_name}</p>
+    <span class="status-chip"><span class="dot" id="status-dot"></span><span id="status-text">—</span></span>
   </div>
 
   <div class="btn-row">
-    <button class="btn-pill outline" onclick="window.location.reload()">Làm mới</button>
+    <button class="btn-pill outline" onclick="window.location.reload()">↻ Làm mới</button>
     <button class="btn-pill primary" onclick="document.getElementById('reviews-section').scrollIntoView({{behavior:'smooth'}})">Xem đánh giá</button>
   </div>
 
-  <div class="quickstats">
-    <div class="qs"><div class="val" id="qs-rating">-</div><div class="label">Đánh giá</div></div>
-    <div class="qs"><div class="val" id="qs-members">-</div><div class="label">Thành viên</div></div>
-    <div class="qs"><div class="val" id="qs-status">-</div><div class="label">Trạng thái</div></div>
+  <div class="scoreboard">
+    <div class="score-block"><div class="val" id="qs-rating">-</div><div class="label">Đánh giá</div></div>
+    <div class="score-block"><div class="val" id="qs-members">-</div><div class="label">Thành viên</div></div>
+    <div class="score-block"><div class="val" id="qs-latency">-</div><div class="label">Ping</div></div>
   </div>
 
-  <div class="section">
+  <div class="panel">
     <h2>Thông tin bot</h2>
-    <div class="info-line"><span class="k">Chủ sở hữu</span><span>{owner_name}</span></div>
-    <div class="info-line"><span class="k">Ngày tạo</span><span id="info-created">-</span></div>
-    <div class="info-line"><span class="k">Đang hoạt động</span><span id="info-online">-</span></div>
-    <div class="info-line"><span class="k">Độ trễ (ping)</span><span id="info-latency">-</span></div>
-    <div class="info-line"><span class="k">Server đang dùng</span><span id="info-guilds">-</span></div>
-    <div class="info-line"><span class="k">Lượt xem trang</span><span id="info-views">-</span></div>
+    <div class="info-line"><span class="k">Chủ sở hữu</span><span class="v">{owner_name}</span></div>
+    <div class="info-line"><span class="k">Ngày tạo</span><span class="v" id="info-created">-</span></div>
+    <div class="info-line"><span class="k">Đang hoạt động</span><span class="v" id="info-online">-</span></div>
+    <div class="info-line"><span class="k">Server đang dùng</span><span class="v" id="info-guilds">-</span></div>
+    <div class="info-line"><span class="k">Lượt xem trang</span><span class="v" id="info-views">-</span></div>
+    <div class="info-line"><span class="k">CPU tiến trình</span><span class="v" id="info-cpu">-</span></div>
+    <div class="info-line"><span class="k">RAM tiến trình</span><span class="v" id="info-ram">-</span></div>
   </div>
 
-  <div class="section" id="reviews-section">
+  <div class="panel" id="reviews-section">
     <h2>Xếp hạng và đánh giá</h2>
     <div class="rating-overview">
       <div class="rating-big">
@@ -242,11 +303,11 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
         <div class="stars" id="rb-stars">☆☆☆☆☆</div>
         <div class="count" id="rb-count">0 đánh giá</div>
       </div>
-      <div class="dist" id="rb-dist"></div>
+      <div class="meter" id="rb-dist"></div>
     </div>
   </div>
 
-  <div class="section">
+  <div class="panel">
     <h2>Viết đánh giá</h2>
 
     <div id="signed-out-view">
@@ -256,7 +317,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
           data-callback="handleGoogleCredential"
           data-auto_prompt="false">
         </div>
-        <div class="g_id_signin" data-type="standard" data-shape="pill" data-theme="filled_blue" data-text="signin_with" data-size="large"></div>
+        <div class="g_id_signin" data-type="standard" data-shape="pill" data-theme="filled_black" data-text="signin_with" data-size="large"></div>
       </div>
       <p class="muted">Cần đăng nhập Google để gửi đánh giá (chống spam vote ảo).</p>
     </div>
@@ -276,11 +337,12 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
     </div>
   </div>
 
-  <div class="section" style="border-bottom:none;">
+  <div class="panel">
+    <h2>Đánh giá gần đây</h2>
     <div id="reviews-list"><div class="empty-note">Đang tải...</div></div>
   </div>
 
-  <div class="footer">Cập nhật mỗi 15 giây</div>
+  <div class="footer"><span class="pulse"></span> Tự cập nhật mỗi 15 giây</div>
 </div>
 
 <script>
@@ -359,7 +421,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
     wrap.innerHTML = [5,4,3,2,1].map(n => {{
       const count = dist[n] || 0;
       const pct = total ? Math.round((count / total) * 100) : 0;
-      return `<div class="dist-row"><span class="n">${{n}}</span><div class="bar-track"><div class="bar-fill" style="width:${{pct}}%"></div></div></div>`;
+      return `<div class="meter-row"><span class="n">${{n}}</span><div class="track"><div class="fill" style="width:${{pct}}%"></div></div></div>`;
     }}).join('');
   }}
 
@@ -372,15 +434,15 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
       const initial = (r.name || '?').trim().charAt(0).toUpperCase();
       return `
       <div class="review">
-        <div class="review-top">
-          <div class="avatar-circle">${{escapeHtml(initial)}}</div>
-          <div>
-            <div class="review-name">${{escapeHtml(r.name)}}</div>
-            <div class="review-date">${{timeAgo(r.ts)}}</div>
+        <div class="avatar-circle">${{escapeHtml(initial)}}</div>
+        <div class="review-bubble">
+          <div class="review-top">
+            <span class="review-name">${{escapeHtml(r.name)}}</span>
+            <span class="review-date">${{timeAgo(r.ts)}}</span>
           </div>
+          <div class="review-stars">${{'★'.repeat(r.stars)}}${{'☆'.repeat(5 - r.stars)}}</div>
+          <div class="review-comment">${{escapeHtml(r.comment)}}</div>
         </div>
-        <div class="review-stars">${{'★'.repeat(r.stars)}}${{'☆'.repeat(5 - r.stars)}}</div>
-        <div class="review-comment">${{escapeHtml(r.comment)}}</div>
       </div>`;
     }}).join('');
   }}
@@ -392,11 +454,12 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
       document.getElementById('app-icon').src = data.avatar_url || '';
       document.getElementById('app-name').textContent = data.name || 'Bot';
       document.getElementById('qs-members').textContent = data.member_count ? data.member_count.toLocaleString('vi-VN') : '-';
-      document.getElementById('qs-status').textContent = data.online ? 'Hoạt động' : 'Ngoại tuyến';
+      document.getElementById('qs-latency').textContent = data.latency_ms != null ? data.latency_ms + 'ms' : '-';
+      document.getElementById('status-dot').className = 'dot ' + (data.online ? 'on' : 'off');
+      document.getElementById('status-text').textContent = data.online ? 'Đang hoạt động' : 'Ngoại tuyến';
       document.getElementById('info-created').textContent = data.created_at ? new Date(data.created_at).toLocaleDateString('vi-VN') : '-';
       document.getElementById('info-online').innerHTML = data.online
         ? '<span class="dot-online">● Đang hoạt động</span>' : '<span class="dot-offline">● Ngoại tuyến</span>';
-      document.getElementById('info-latency').textContent = data.latency_ms != null ? data.latency_ms + ' ms' : '-';
       document.getElementById('info-guilds').textContent = data.guild_count ?? '-';
     }} catch (e) {{ console.error(e); }}
   }}
@@ -406,6 +469,8 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
       const res = await fetch('/api/stats');
       const data = await res.json();
       document.getElementById('info-views').textContent = data.views;
+      document.getElementById('info-cpu').textContent = data.cpu_percent != null ? data.cpu_percent.toFixed(1) + '%' : '-';
+      document.getElementById('info-ram').textContent = data.ram_mb != null ? Math.round(data.ram_mb) + ' MB' : '-';
       document.getElementById('qs-rating').innerHTML = data.rating_avg ? `${{data.rating_avg}} <span class="star">★</span>` : '- ★';
       document.getElementById('rb-avg').textContent = data.rating_avg || '0.0';
       document.getElementById('rb-count').textContent = `${{data.rating_count}} đánh giá`;

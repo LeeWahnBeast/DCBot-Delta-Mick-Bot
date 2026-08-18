@@ -121,19 +121,50 @@ async def generate_auto_message() -> str | None:
 # ---------------------------------------------------------------------------
 
 
+# Bộ đệm RAM cho việc "học từ": TRƯỚC ĐÂY mỗi từ lạ trong mỗi tin nhắn tốn 1
+# lượt ĐỌC + 1 lượt GHI Firestore riêng (get_word rồi save_word) -> server chat
+# đông là hết quota free tier ngay (429 RESOURCE_EXHAUSTED, xem log lỗi). Giờ
+# chỉ cộng dồn vào dict RAM ở đây, KHÔNG đụng Firestore; một tasks.loop định kỳ
+# (xem flush_learned_words, gọi từ discord_bot.py) mới đẩy cả đợt lên bằng 1
+# batch ghi duy nhất (Firestore Increment - không cần đọc trước).
+_pending_word_counts: dict[str, int] = {}
+_pending_word_last_seen: dict[str, int] = {}
+_PENDING_WORD_CAP = 500  # chặn RAM phình nếu chat cực đông mà chưa kịp flush
+
+
 async def learn_from_message(content: str) -> None:
-    """Ghi nhận tần suất từ lạ xuất hiện trong chat. KHÔNG tự gọi AI tra nghĩa
-    (đã bỏ để giảm số lần gọi Groq mỗi tin nhắn -> giảm CPU/độ trễ nền); nghĩa
-    của từ chỉ được lưu khi member chủ động dạy qua `/từ-điển` (xem teach_word)."""
+    """Ghi nhận tần suất từ lạ xuất hiện trong chat (chỉ cộng dồn vào RAM, xem
+    flush_learned_words() để biết khi nào thật sự ghi Firestore). KHÔNG tự gọi
+    AI tra nghĩa (đã bỏ để giảm số lần gọi Groq mỗi tin nhắn -> giảm CPU/độ trễ
+    nền); nghĩa của từ chỉ được lưu khi member chủ động dạy qua `/từ-điển`
+    (xem teach_word)."""
     words = {w.lower() for w in _WORD_RE.findall(content) if len(w) >= AI_LEARN_MIN_WORD_LEN}
     words -= _STOPWORDS
     if not words:
         return
+    if len(_pending_word_counts) >= _PENDING_WORD_CAP:
+        return  # đang chờ flush quá nhiều từ rồi, bỏ qua tin nhắn này để tránh phình RAM
 
+    now = int(time.time())
     for word in words:
-        existing = await db.get_word(word)
-        count = existing.get("count", 0) + 1
-        await db.save_word(word, {"count": count, "last_seen": int(time.time())})
+        _pending_word_counts[word] = _pending_word_counts.get(word, 0) + 1
+        _pending_word_last_seen[word] = now
+
+
+async def flush_learned_words() -> None:
+    """Đẩy toàn bộ số đếm từ đang chờ trong RAM lên Firestore theo batch. Gọi
+    định kỳ (vd. mỗi vài phút) từ 1 tasks.loop trong discord_bot.py - KHÔNG
+    gọi trực tiếp mỗi tin nhắn."""
+    if not _pending_word_counts:
+        return
+    counts = dict(_pending_word_counts)
+    last_seen = dict(_pending_word_last_seen)
+    _pending_word_counts.clear()
+    _pending_word_last_seen.clear()
+    try:
+        await db.bump_word_counts(counts, last_seen)
+    except Exception as e:
+        log.warning("Flush %d từ học lên Firestore lỗi (có thể mất lượt đếm đợt này): %s", len(counts), e)
 
 
 async def teach_word(word: str, meaning: str) -> dict:
