@@ -75,9 +75,25 @@ ACHIEVEMENTS: dict[str, dict] = {
 }
 
 
+# Chặn thông báo lặp lại khi Firestore không lưu được (vd. hết quota): nếu 1
+# user vừa "mở khóa" 1 thành tựu nhưng lưu Firestore thất bại, KHÔNG thử/báo
+# lại thành tựu đó nữa trong phiên chạy hiện tại (chỉ dev/test - nếu Firestore
+# hồi phục, restart bot sẽ tự đồng bộ lại bình thường vì đây chỉ là cache RAM
+# tạm, không phải trạng thái đã mở khóa thật).
+_unlock_save_failed: set[tuple[int, str]] = set()
+
+
 async def unlock(user_id: int, achievement_id: str) -> dict | None:
-    """Mở khóa thành tựu nếu chưa có. Trả về info thành tựu nếu vừa mở khóa, None nếu đã có / không tồn tại."""
+    """Mở khóa thành tựu nếu chưa có. Trả về info thành tựu nếu vừa mở khóa
+    VÀ LƯU THÀNH CÔNG vào Firestore, None nếu đã có / không tồn tại / lưu thất
+    bại (vd. Firestore hết quota - trước đây bug ở chỗ này: lưu thất bại vẫn
+    trả về "đã mở khóa" -> bot cứ báo "Chào Sân" lặp lại mỗi tin nhắn vì thành
+    tựu không bao giờ thực sự được ghi nhận là đã có)."""
     if achievement_id not in ACHIEVEMENTS:
+        return None
+
+    guard_key = (user_id, achievement_id)
+    if guard_key in _unlock_save_failed:
         return None
 
     user = await db.get_user(user_id)
@@ -88,7 +104,15 @@ async def unlock(user_id: int, achievement_id: str) -> dict | None:
     info = ACHIEVEMENTS[achievement_id]
     unlocked.add(achievement_id)
     new_mick = user["mick"] + info["reward"]
-    await db.save_user(user_id, {"achievements": list(unlocked), "mick": new_mick})
+    ok = await db.save_user(user_id, {"achievements": list(unlocked), "mick": new_mick})
+    if not ok:
+        _unlock_save_failed.add(guard_key)
+        log.warning(
+            "Không lưu được thành tựu %s cho user %s (Firestore lỗi/hết quota) - "
+            "tạm hoãn thông báo, sẽ tự thử lại nếu bot restart.",
+            achievement_id, user_id,
+        )
+        return None
     return info
 
 

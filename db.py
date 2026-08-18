@@ -103,20 +103,24 @@ async def _get_doc(collection: str, doc_id: str) -> dict:
         raise
 
 
-async def _set_doc(collection: str, doc_id: str, data: dict, merge: bool = True) -> None:
+async def _set_doc(collection: str, doc_id: str, data: dict, merge: bool = True) -> bool:
+    """Trả về True nếu ghi thành công (kể cả fallback RAM), False nếu bị bỏ
+    qua do Firestore hết quota - để CALLER (vd. unlock thành tựu) biết mà
+    KHÔNG báo thành công giả khi dữ liệu thực ra chưa lưu được."""
     if _use_memory_fallback:
         key = f"{collection}/{doc_id}"
         if merge:
             _memory_store.setdefault(key, {}).update(data)
         else:
             _memory_store[key] = dict(data)
-        return
+        return True
     try:
         await _client.collection(collection).document(doc_id).set(data, merge=merge)
+        return True
     except Exception as e:
         if _is_quota_error(e):
             _warn_quota_throttled(f"ghi {collection}/{doc_id}", e)
-            return
+            return False
         raise
 
 
@@ -129,8 +133,8 @@ async def get_bot_state() -> dict:
     return await _get_doc("bot_state", "main")
 
 
-async def save_bot_state(state: dict) -> None:
-    await _set_doc("bot_state", "main", state, merge=True)
+async def save_bot_state(state: dict) -> bool:
+    return await _set_doc("bot_state", "main", state, merge=True)
 
 
 # ---------------------------------------------------------------------------
@@ -142,8 +146,8 @@ async def get_video(video_id: str) -> dict:
     return await _get_doc("videos", video_id)
 
 
-async def save_video(video_id: str, data: dict) -> None:
-    await _set_doc("videos", video_id, data, merge=True)
+async def save_video(video_id: str, data: dict) -> bool:
+    return await _set_doc("videos", video_id, data, merge=True)
 
 
 async def get_unnotified_video_ids(limit: int = 5) -> list[str]:
@@ -226,10 +230,14 @@ async def get_all_users(use_cache: bool = True) -> list[tuple[str, dict]]:
     return out
 
 
-async def save_user(user_id: int, data: dict) -> None:
+async def save_user(user_id: int, data: dict) -> bool:
+    """Trả về True nếu lưu thành công, False nếu bị bỏ qua do Firestore hết
+    quota (caller nên kiểm tra giá trị này trước khi coi 1 thay đổi - vd. mở
+    khóa thành tựu - là đã chắc chắn lưu, tránh báo/công thông báo giả)."""
     global _all_users_cache
-    await _set_doc("users", str(user_id), data, merge=True)
+    ok = await _set_doc("users", str(user_id), data, merge=True)
     _all_users_cache = None
+    return ok
 
 
 # ---------------------------------------------------------------------------
@@ -241,8 +249,8 @@ async def get_daily_state() -> dict:
     return await _get_doc("daily", "current")
 
 
-async def save_daily_state(data: dict) -> None:
-    await _set_doc("daily", "current", data, merge=True)
+async def save_daily_state(data: dict) -> bool:
+    return await _set_doc("daily", "current", data, merge=True)
 
 
 # ---------------------------------------------------------------------------
@@ -293,8 +301,8 @@ async def get_business(user_id: int, kind: str) -> dict:
     return await _get_doc("businesses", f"{user_id}_{kind}")
 
 
-async def save_business(user_id: int, kind: str, data: dict) -> None:
-    await _set_doc("businesses", f"{user_id}_{kind}", data, merge=True)
+async def save_business(user_id: int, kind: str, data: dict) -> bool:
+    return await _set_doc("businesses", f"{user_id}_{kind}", data, merge=True)
 
 
 async def get_all_businesses() -> list[tuple[str, dict]]:
