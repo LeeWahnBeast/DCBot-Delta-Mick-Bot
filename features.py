@@ -1127,9 +1127,10 @@ async def open_business(user_id: int, kind: str) -> dict:
         return {"ok": False, "reason": "already_open"}
 
     cost = BUSINESS_OPEN_COST[kind]
-    user = await db.get_user(user_id)
-    if user["mick"] < cost:
-        return {"ok": False, "reason": "insufficient_funds", "cost": cost}
+    if not economy.is_owner(user_id):
+        user = await db.get_user(user_id)
+        if user["mick"] < cost:
+            return {"ok": False, "reason": "insufficient_funds", "cost": cost}
 
     await economy.add_mick(user_id, -cost)
     now = int(time.time())
@@ -1148,9 +1149,10 @@ async def hire_staff(user_id: int, kind: str) -> dict:
     if biz.get("staff", 0) >= BUSINESS_MAX_STAFF:
         return {"ok": False, "reason": "max_staff"}
 
-    user = await db.get_user(user_id)
-    if user["mick"] < BUSINESS_HIRE_COST:
-        return {"ok": False, "reason": "insufficient_funds", "cost": BUSINESS_HIRE_COST}
+    if not economy.is_owner(user_id):
+        user = await db.get_user(user_id)
+        if user["mick"] < BUSINESS_HIRE_COST:
+            return {"ok": False, "reason": "insufficient_funds", "cost": BUSINESS_HIRE_COST}
 
     await economy.add_mick(user_id, -BUSINESS_HIRE_COST)
     new_staff = biz.get("staff", 0) + 1

@@ -149,29 +149,48 @@ def _discord_avatar_url(user: dict) -> str:
     return f"https://cdn.discordapp.com/embed/avatars/{default_idx}.png"
 
 
-PAGE_TEMPLATE = """<!DOCTYPE html>
-<html lang="vi">
-<head>
-<meta charset="UTF-8">
+# ---------------------------------------------------------------------------
+# CSS dùng chung cho cả 2 trang (Chủ / Vote). Theme sáng-tối qua thuộc tính
+# [data-theme] trên <html> - JS đọc/ghi localStorage("mick-theme") và set
+# thuộc tính này TRƯỚC khi trang vẽ (inline script trong <head>) để tránh
+# nháy màu (flash of wrong theme) lúc tải trang.
+# ---------------------------------------------------------------------------
+SHARED_HEAD = """<meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>{bot_name} · Bot Card</title>
 <link rel="icon" href="data:,">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<script>
+  (function() {{
+    var saved = localStorage.getItem('mick-theme');
+    document.documentElement.setAttribute('data-theme', saved === 'light' ? 'light' : 'dark');
+  }})();
+</script>
 <style>
-  :root {{
+  :root, [data-theme="dark"] {{
     color-scheme: dark;
     --bg: #08070f; --bg-2: #0d0c1a; --surface: #141225; --surface-2: #1c1a33;
     --ink: #f3f2fb; --muted: #918cb0; --outline: #2a2748;
     --blurple: #5865f2; --cyan: #35e6c8; --violet: #b06bff; --pink: #ff5fa2;
     --online: #35e67a; --offline: #ff5f6d;
+    --shadow-soft: rgba(0,0,0,.25);
+  }}
+  [data-theme="light"] {{
+    color-scheme: light;
+    --bg: #f3f1fb; --bg-2: #eae7fb; --surface: #ffffff; --surface-2: #f1eef9;
+    --ink: #17152a; --muted: #6d688b; --outline: #ded9f2;
+    --blurple: #5865f2; --cyan: #0fb89e; --violet: #8d4de0; --pink: #e0447e;
+    --online: #1aa354; --offline: #e0313f;
+    --shadow-soft: rgba(88,101,242,.12);
+  }}
+  :root {{
     --font-display: "Space Grotesk", sans-serif;
     --font-body: "Inter", "Segoe UI", sans-serif;
     --font-mono: "JetBrains Mono", ui-monospace, monospace;
   }}
   * {{ box-sizing: border-box; }}
   body {{
-    margin: 0; color: var(--ink);
+    margin: 0; color: var(--ink); transition: background-color .2s, color .2s;
     background:
       radial-gradient(600px 300px at 15% -5%, rgba(88,101,242,.35), transparent 60%),
       radial-gradient(500px 260px at 100% 0%, rgba(176,107,255,.25), transparent 55%),
@@ -184,12 +203,44 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
   :focus-visible {{ outline: 2px solid var(--cyan); outline-offset: 2px; }}
 
   /* --- top tag --- */
-  .topbar {{ display: flex; justify-content: space-between; align-items: center; padding: 18px 20px 4px; }}
+  .topbar {{ display: flex; justify-content: space-between; align-items: center; padding: 18px 20px 4px; gap: 8px; }}
   .tag {{
     font-family: var(--font-mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
     color: var(--muted); border: 1px solid var(--outline); border-radius: 100px; padding: 4px 10px;
     background: rgba(88,101,242,.08);
   }}
+  .topbar-right {{ display: flex; align-items: center; gap: 8px; }}
+  .theme-toggle {{
+    width: 30px; height: 30px; border-radius: 100px; border: 1px solid var(--outline);
+    background: var(--surface); color: var(--ink); cursor: pointer; font-size: 14px;
+    display: flex; align-items: center; justify-content: center; padding: 0;
+  }}
+  .theme-toggle:hover {{ border-color: var(--cyan); }}
+  .nav-link {{
+    font-family: var(--font-mono); font-size: 11px; color: var(--muted); text-decoration: none;
+    border: 1px solid var(--outline); border-radius: 100px; padding: 6px 12px; display: inline-flex;
+    align-items: center; gap: 4px;
+  }}
+  .nav-link:hover {{ color: var(--cyan); border-color: var(--cyan); }}
+
+  /* --- intro / creator card --- */
+  .intro-card {{
+    display: flex; flex-direction: column; gap: 10px;
+  }}
+  .creator-row {{
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    padding: 10px 12px; background: var(--surface-2); border-radius: 12px;
+  }}
+  .creator-row .who {{ display: flex; flex-direction: column; gap: 1px; }}
+  .creator-row .role {{ font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }}
+  .creator-row .name {{ font-size: 13px; font-weight: 600; }}
+  .tiktok-link {{
+    display: inline-flex; align-items: center; gap: 6px; font-family: var(--font-mono); font-size: 12px;
+    color: var(--ink); text-decoration: none; background: var(--surface); border: 1px solid var(--outline);
+    border-radius: 100px; padding: 6px 12px; white-space: nowrap;
+  }}
+  .tiktok-link:hover {{ border-color: var(--pink); color: var(--pink); }}
+  .about-text {{ font-size: 13px; color: var(--muted); line-height: 1.6; margin: 0; }}
 
   /* --- hero player card --- */
   .hero {{ display: flex; flex-direction: column; align-items: center; text-align: center; padding: 20px 20px 8px; }}
@@ -348,12 +399,36 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
     .footer .pulse {{ animation: pulse 2s ease-in-out infinite; }}
   }}
   @keyframes pulse {{ 0%,100% {{ opacity: 1; }} 50% {{ opacity: .3; }} }}
-</style>
+"""
+
+THEME_TOGGLE_SCRIPT = """
+  const themeBtn = document.getElementById('theme-toggle');
+  function currentTheme() {{ return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark'; }}
+  function paintThemeBtn() {{ themeBtn.textContent = currentTheme() === 'light' ? '🌙' : '☀️'; }}
+  themeBtn.addEventListener('click', () => {{
+    const next = currentTheme() === 'light' ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem('mick-theme', next);
+    paintThemeBtn();
+  }});
+  paintThemeBtn();
+"""
+
+MAIN_PAGE_TEMPLATE = """<!DOCTYPE html>
+<html lang="vi">
+<head>
+<title>{bot_name} · Bot Card</title>
+""" + SHARED_HEAD + """</style>
 </head>
 <body>
 <div class="wrap">
 
-  <div class="topbar"><span class="tag">TikTok · Discord Bot</span></div>
+  <div class="topbar">
+    <span class="tag">TikTok · Discord Bot</span>
+    <div class="topbar-right">
+      <button class="theme-toggle" id="theme-toggle" aria-label="Đổi giao diện sáng/tối">☀️</button>
+    </div>
+  </div>
 
   <div class="hero">
     <div class="avatar-ring"><img id="app-icon" src="" alt="icon"></div>
@@ -364,13 +439,26 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 
   <div class="btn-row">
     <button class="btn-pill outline" onclick="window.location.reload()">↻ Làm mới</button>
-    <button class="btn-pill primary" onclick="document.getElementById('reviews-section').scrollIntoView({{behavior:'smooth'}})">Xem đánh giá</button>
+    <a class="btn-pill primary" href="/vote">Đánh giá bot ★</a>
   </div>
 
   <div class="scoreboard">
     <div class="score-block"><div class="val" id="qs-rating">-</div><div class="label">Đánh giá</div></div>
     <div class="score-block"><div class="val" id="qs-members">-</div><div class="label">Thành viên</div></div>
     <div class="score-block"><div class="val" id="qs-latency">-</div><div class="label">Ping</div></div>
+  </div>
+
+  <div class="panel intro-card">
+    <h2>Giới thiệu</h2>
+    <p class="about-text">{bot_name} theo dõi và thông báo TikTok LIVE / video mới, kèm hệ thống kinh tế MICK, level, minigame và kinh doanh ảo ngay trong Discord server.</p>
+    <div class="creator-row">
+      <div class="who"><span class="role">Người tạo bot</span><span class="name">{creator_name}</span></div>
+      <a class="tiktok-link" href="{creator_tiktok_url}" target="_blank" rel="noopener">🎵 @{creator_tiktok}</a>
+    </div>
+    <div class="creator-row">
+      <div class="who"><span class="role">Hỗ trợ / theo dõi cho</span><span class="name">TikTok {supported_tiktok}</span></div>
+      <a class="tiktok-link" href="{supported_tiktok_url}" target="_blank" rel="noopener">🎵 @{supported_tiktok}</a>
+    </div>
   </div>
 
   <div class="panel">
@@ -399,6 +487,137 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
     </div>
     <div class="xp-track"><div class="xp-fill" id="pf-xp-fill" style="width:0%"></div></div>
     <div class="xp-caption" id="pf-xp-caption">0/0 XP</div>
+  </div>
+
+  <div class="panel">
+    <h2>Xếp hạng nhanh</h2>
+    <div class="rating-overview">
+      <div class="rating-big">
+        <div class="num" id="rb-avg">-</div>
+        <div class="stars" id="rb-stars">☆☆☆☆☆</div>
+        <div class="count" id="rb-count">0 đánh giá</div>
+      </div>
+      <div class="meter" id="rb-dist"></div>
+    </div>
+  </div>
+
+  <div class="btn-row" style="padding-top:4px;">
+    <a class="btn-pill primary" href="/vote" style="width:100%;">Xem & viết đánh giá →</a>
+  </div>
+
+  <div class="footer"><span class="pulse"></span> Tự cập nhật mỗi 15 giây</div>
+</div>
+
+<script>
+""" + THEME_TOGGLE_SCRIPT + """
+  async function checkSession() {{
+    try {{
+      const res = await fetch('/api/me');
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.signed_in) {{ showProfile(); }}
+    }} catch (e) {{}}
+  }}
+
+  async function showProfile() {{
+    try {{
+      const meRes = await fetch('/api/me');
+      const me = await meRes.json();
+      if (!me.signed_in) return;
+      const res = await fetch('/api/profile');
+      if (!res.ok) return;
+      const p = await res.json();
+      document.getElementById('profile-panel').classList.remove('profile-hidden');
+      document.getElementById('pf-avatar').src = me.avatar_url || '';
+      document.getElementById('pf-name').textContent = me.username || '';
+      document.getElementById('pf-level').textContent = 'Level ' + p.level;
+      document.getElementById('pf-mick').textContent = p.mick;
+      document.getElementById('pf-ve').textContent = p.ve;
+      const pct = p.xp_needed ? Math.min(100, Math.round((p.xp / p.xp_needed) * 100)) : 0;
+      document.getElementById('pf-xp-fill').style.width = pct + '%';
+      document.getElementById('pf-xp-caption').textContent = `${{p.xp}}/${{p.xp_needed}} XP`;
+    }} catch (e) {{ console.error(e); }}
+  }}
+
+  function renderDistribution(dist, total) {{
+    const wrap = document.getElementById('rb-dist');
+    wrap.innerHTML = [5,4,3,2,1].map(n => {{
+      const count = dist[n] || 0;
+      const pct = total ? Math.round((count / total) * 100) : 0;
+      return `<div class="meter-row"><span class="n">${{n}}</span><div class="track"><div class="fill" style="width:${{pct}}%"></div></div></div>`;
+    }}).join('');
+  }}
+
+  async function refreshBotInfo() {{
+    try {{
+      const res = await fetch('/api/bot-info');
+      const data = await res.json();
+      document.getElementById('app-icon').src = data.avatar_url || '';
+      document.getElementById('app-name').textContent = data.name || 'Bot';
+      document.getElementById('qs-members').textContent = data.member_count ? data.member_count.toLocaleString('vi-VN') : '-';
+      document.getElementById('qs-latency').textContent = data.latency_ms != null ? data.latency_ms + 'ms' : '-';
+      document.getElementById('status-dot').className = 'dot ' + (data.online ? 'on' : 'off');
+      document.getElementById('status-text').textContent = data.online ? 'Đang hoạt động' : 'Ngoại tuyến';
+      document.getElementById('info-created').textContent = data.created_at ? new Date(data.created_at).toLocaleDateString('vi-VN') : '-';
+      document.getElementById('info-online').innerHTML = data.online
+        ? '<span class="dot-online">● Đang hoạt động</span>' : '<span class="dot-offline">● Ngoại tuyến</span>';
+      document.getElementById('info-guilds').textContent = data.guild_count ?? '-';
+    }} catch (e) {{ console.error(e); }}
+  }}
+
+  async function refreshStats() {{
+    try {{
+      const res = await fetch('/api/stats');
+      const data = await res.json();
+      document.getElementById('info-views').textContent = data.views;
+      document.getElementById('info-cpu').textContent = data.cpu_percent != null ? data.cpu_percent.toFixed(1) + '%' : '-';
+      document.getElementById('info-ram').textContent = data.ram_mb != null ? Math.round(data.ram_mb) + ' MB' : '-';
+      document.getElementById('qs-rating').innerHTML = data.rating_avg ? `${{data.rating_avg}} <span class="star">★</span>` : '- ★';
+      document.getElementById('rb-avg').textContent = data.rating_avg || '0.0';
+      document.getElementById('rb-count').textContent = `${{data.rating_count}} đánh giá`;
+      document.getElementById('rb-stars').textContent = '★'.repeat(Math.round(data.rating_avg)) + '☆'.repeat(5 - Math.round(data.rating_avg));
+    }} catch (e) {{ console.error(e); }}
+  }}
+
+  async function refreshDistribution() {{
+    try {{
+      const res = await fetch('/api/rating-distribution');
+      const data = await res.json();
+      const total = Object.values(data.distribution).reduce((a,b) => a+b, 0);
+      renderDistribution(data.distribution, total);
+    }} catch (e) {{ console.error(e); }}
+  }}
+
+  checkSession();
+  refreshBotInfo();
+  refreshStats();
+  refreshDistribution();
+  setInterval(refreshBotInfo, 15000);
+  setInterval(refreshStats, 15000);
+</script>
+</body>
+</html>"""
+
+VOTE_PAGE_TEMPLATE = """<!DOCTYPE html>
+<html lang="vi">
+<head>
+<title>{bot_name} · Đánh giá</title>
+""" + SHARED_HEAD + """</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <a class="nav-link" href="/">← Trang chủ</a>
+    <div class="topbar-right">
+      <button class="theme-toggle" id="theme-toggle" aria-label="Đổi giao diện sáng/tối">☀️</button>
+    </div>
+  </div>
+
+  <div class="hero" style="padding-top:8px;">
+    <div class="avatar-ring" style="width:64px;height:64px;"><img id="app-icon" src="" alt="icon"></div>
+    <h1 id="app-name" style="font-size:19px;">Đang tải...</h1>
+    <p class="dev">Đánh giá & xếp hạng</p>
   </div>
 
   <div class="panel" id="reviews-section">
@@ -448,6 +667,7 @@ PAGE_TEMPLATE = """<!DOCTYPE html>
 </div>
 
 <script>
+""" + THEME_TOGGLE_SCRIPT + """
   const starsEl = document.querySelectorAll('#stars span');
   const commentInput = document.getElementById('comment-input');
   const submitBtn = document.getElementById('submit-btn');
@@ -655,11 +875,34 @@ def _get_session(request: web.Request) -> dict | None:
     return _verify_session(token)
 
 
+CREATOR_TIKTOK = "lee.wahn.beast"
+SUPPORTED_TIKTOK = "tahnuyo_0"
+
+
 async def handle_index(request: web.Request):
     from discord_bot import get_bot_info
 
     info = get_bot_info()
-    page = PAGE_TEMPLATE.format(
+    page = MAIN_PAGE_TEMPLATE.format(
+        bot_name=html.escape(info.get("name") or "Bot"),
+        owner_name=html.escape(BOT_OWNER_NAME),
+        creator_name=html.escape(BOT_OWNER_NAME),
+        creator_tiktok=html.escape(CREATOR_TIKTOK),
+        creator_tiktok_url=f"https://www.tiktok.com/@{CREATOR_TIKTOK}",
+        supported_tiktok=html.escape(SUPPORTED_TIKTOK),
+        supported_tiktok_url=f"https://www.tiktok.com/@{SUPPORTED_TIKTOK}",
+    )
+    response = web.Response(text=page, content_type="text/html")
+    _get_or_set_voter_id(request, response)
+    await db.increment_views()
+    return response
+
+
+async def handle_vote(request: web.Request):
+    from discord_bot import get_bot_info
+
+    info = get_bot_info()
+    page = VOTE_PAGE_TEMPLATE.format(
         bot_name=html.escape(info.get("name") or "Bot"),
         owner_name=html.escape(BOT_OWNER_NAME),
         link_reward=LINK_DISCORD_REWARD_MICK,
@@ -667,7 +910,6 @@ async def handle_index(request: web.Request):
     )
     response = web.Response(text=page, content_type="text/html")
     _get_or_set_voter_id(request, response)
-    await db.increment_views()
     return response
 
 
@@ -846,6 +1088,7 @@ async def handle_api_rate(request: web.Request):
 async def start_web_server():
     app = web.Application()
     app.router.add_get("/", handle_index)
+    app.router.add_get("/vote", handle_vote)
     app.router.add_get("/health", handle_health)
     app.router.add_get("/api/stats", handle_api_stats)
     app.router.add_get("/api/bot-info", handle_api_bot_info)
