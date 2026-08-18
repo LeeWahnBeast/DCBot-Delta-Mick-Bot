@@ -48,6 +48,8 @@ from config import (
     TRANSFER_OTP_LENGTH,
     TRANSFER_OTP_TTL_SEC,
     TRIVIA_TIMEOUT_SEC,
+    TICKET_EMOJI,
+    GAME_TICKET_COST,
     log,
 )
 from tiktok_client import TikTokClient
@@ -315,14 +317,14 @@ async def _sync_guild_identity(profile: dict, img_bytes: bytes):
         log.warning("Không tìm thấy guild id=%s để đồng bộ.", DISCORD_GUILD_ID)
         return
 
-    new_name = GUILD_NAME_TEMPLATE.format(nickname=profile["nickname"], username=profile["username"])
+    # Đã bỏ đổi TÊN server theo yêu cầu - chỉ còn đồng bộ icon server theo TikTok.
     try:
-        await guild.edit(icon=img_bytes, name=new_name, reason=f"Đồng bộ theo TikTok @{TIKTOK_USERNAME}")
-        log.info("Đã đổi icon + tên server theo TikTok @%s.", TIKTOK_USERNAME)
+        await guild.edit(icon=img_bytes, reason=f"Đồng bộ icon theo TikTok @{TIKTOK_USERNAME}")
+        log.info("Đã đổi icon server theo TikTok @%s.", TIKTOK_USERNAME)
     except discord.Forbidden:
-        log.warning("Bot không có quyền 'Manage Server' để đổi icon/tên.")
+        log.warning("Bot không có quyền 'Manage Server' để đổi icon.")
     except Exception as e:
-        log.warning("Đổi icon/tên server lỗi: %s", e)
+        log.warning("Đổi icon server lỗi: %s", e)
 
 
 @sync_identity_loop.before_loop
@@ -533,7 +535,8 @@ _QUEST_TRIGGERS = {
     "femboy_3": "i am femboy",
     "ai_hoi_3": "ai hỏi",
     "ghet_tomboy": "tôi ghét tomboy",
-    "depchai_gay": "btw i love depchai because he's gay",
+    "depchai_gay": "btw, i love <@1011257705031274536> because he's is my girlfriend and gay <3",
+    "nsc_tree": "i love nsc because he crashed into a tree.",
 }
 
 
@@ -682,7 +685,8 @@ async def _build_rank_embed(target: discord.Member) -> discord.Embed:
     embed = discord.Embed(title=f"🏅 Rank của {target.display_name}", color=discord.Color.blurple())
     embed.add_field(name="Hạng", value=f"#{position}/{len(users)}", inline=True)
     embed.add_field(name="Level", value=str(profile["level"]), inline=True)
-    embed.add_field(name="MICK", value=f"{MICKCOIN_EMOJI} {profile['mick']}", inline=True)
+    embed.add_field(name="MICK", value=f"{MICKCOIN_EMOJI} {economy.format_mick(profile['mick'])}", inline=True)
+    embed.add_field(name="Vé", value=f"{TICKET_EMOJI} {economy.format_ve(profile['ve'])}", inline=True)
     embed.add_field(name="XP", value=f"{bar}\n{profile['xp']}/{profile['xp_needed']}", inline=False)
     embed.set_thumbnail(url=target.display_avatar.url)
     return embed
@@ -709,7 +713,8 @@ def _current_role_text(target: discord.Member) -> str:
 async def _build_profile_embed(target: discord.Member) -> discord.Embed:
     data = await economy.get_profile(target.id)
     embed = discord.Embed(title=f"📊 Hồ sơ của {target.display_name}", color=discord.Color.blurple())
-    embed.add_field(name="MICK", value=f"{MICKCOIN_EMOJI} {data['mick']}", inline=True)
+    embed.add_field(name="MICK", value=f"{MICKCOIN_EMOJI} {economy.format_mick(data['mick'])}", inline=True)
+    embed.add_field(name="Vé", value=f"{TICKET_EMOJI} {economy.format_ve(data['ve'])}", inline=True)
     embed.add_field(name="Level", value=str(data["level"]), inline=True)
     embed.add_field(name="XP", value=f"{data['xp']}/{data['xp_needed']}", inline=True)
 
@@ -839,6 +844,7 @@ class WordleGuessModal(discord.ui.Modal, title="Đoán từ Wordle"):
 
         embed, finished = result
         view = None if finished else WordleView(self.game_id, self.owner_id)
+        await _append_ticket_footer(embed, self.owner_id)
         await interaction.response.edit_message(embed=embed, view=view)
         if finished:
             await _finish_minigame(interaction, self.owner_id)
@@ -923,6 +929,7 @@ class GuessNumberModal(discord.ui.Modal, title="Đoán số"):
 
         embed, finished = result
         view = None if finished else GuessNumberView(self.game_id, self.owner_id)
+        await _append_ticket_footer(embed, self.owner_id)
         await interaction.response.edit_message(embed=embed, view=view)
         if finished:
             await _finish_minigame(interaction, self.owner_id)
@@ -972,6 +979,7 @@ class RPSView(discord.ui.View):
             return
         for child in self.children:
             child.disabled = True
+        await _append_ticket_footer(embed, self.owner_id)
         await interaction.response.edit_message(embed=embed, view=self)
         await _finish_minigame(interaction, self.owner_id)
         self.stop()
@@ -1009,18 +1017,24 @@ class BetAmountModal(discord.ui.Modal, title="Nhập số MICK muốn cược"):
             return
 
         bet = int(raw)
+        if not await _require_ticket(interaction):
+            return
         result = await economy.place_bet(interaction.user.id, bet)
         if not result["ok"]:
             reason = "Số dư không đủ!" if result["reason"] == "insufficient_funds" else "Số tiền không hợp lệ!"
             await interaction.response.send_message(f"❌ {reason}", ephemeral=True)
+            await economy.add_ve(interaction.user.id, 1)  # hoàn vé vì ván không mở được
             return
 
         owner_id = interaction.user.id
+        wallet_display = economy.format_mick(result["wallet"])
         if self.game_kind == "taixiu":
-            gid, embed = features.start_taixiu(owner_id, bet, result["wallet"])
+            gid, embed = features.start_taixiu(owner_id, bet, wallet_display)
+            await _append_ticket_footer(embed, owner_id)
             await interaction.response.send_message(embed=embed, view=TaiXiuView(gid, owner_id))
         else:
-            gid, embed = features.start_xidach(owner_id, bet, result["wallet"])
+            gid, embed = features.start_xidach(owner_id, bet, wallet_display)
+            await _append_ticket_footer(embed, owner_id)
             await interaction.response.send_message(embed=embed, view=XiDachView(gid, owner_id))
 
 
@@ -1044,6 +1058,7 @@ class TaiXiuView(discord.ui.View):
             return
         for child in self.children:
             child.disabled = True
+        await _append_ticket_footer(embed, self.owner_id)
         await interaction.response.edit_message(embed=embed, view=self)
         await _finish_minigame(interaction, self.owner_id)
         self.stop()
@@ -1082,6 +1097,7 @@ class XiDachView(discord.ui.View):
             return
         embed, finished = result
         view = None if finished else self
+        await _append_ticket_footer(embed, self.owner_id)
         await interaction.response.edit_message(embed=embed, view=view)
         if finished:
             await _finish_minigame(interaction, self.owner_id)
@@ -1095,6 +1111,7 @@ class XiDachView(discord.ui.View):
             return
         for child in self.children:
             child.disabled = True
+        await _append_ticket_footer(embed, self.owner_id)
         await interaction.response.edit_message(embed=embed, view=self)
         await _finish_minigame(interaction, self.owner_id)
         self.stop()
@@ -1126,6 +1143,7 @@ class TriviaView(discord.ui.View):
                 return
             for child in self.children:
                 child.disabled = True
+            await _append_ticket_footer(embed, self.owner_id)
             await interaction.response.edit_message(embed=embed, view=self)
             await _finish_minigame(interaction, self.owner_id)
             self.stop()
@@ -1137,6 +1155,29 @@ class TriviaView(discord.ui.View):
         await features.trivia_timeout(self.game_id)
         for child in self.children:
             child.disabled = True
+
+
+async def _append_ticket_footer(embed: discord.Embed, user_id: int):
+    """Gắn số Vé còn lại vào footer embed - hiển thị mỗi lần chơi game hoặc
+    đang trong game (theo yêu cầu), không trừ thêm Vé."""
+    ve = await economy.get_ve(user_id)
+    line = f"{TICKET_EMOJI} Vé còn lại: {economy.format_ve(ve)}"
+    old = embed.footer.text if embed.footer else None
+    embed.set_footer(text=f"{old} · {line}" if old else line)
+
+
+async def _require_ticket(interaction: discord.Interaction) -> bool:
+    """Trừ GAME_TICKET_COST Vé để mở ván mới. Trả True nếu đủ (đã trừ xong),
+    False nếu không đủ Vé (đã tự trả lời interaction luôn nên caller return ngay)."""
+    result = await economy.spend_game_ticket(interaction.user.id)
+    if not result["ok"]:
+        await interaction.response.send_message(
+            f"❌ Bạn hết Vé rồi! {TICKET_EMOJI} Vé hiện tại: {economy.format_ve(result['ve'])}. "
+            "Nhận thêm Vé qua `/diem-danh` (Daily) mỗi ngày.",
+            ephemeral=True,
+        )
+        return False
+    return True
 
 
 async def _finish_minigame(interaction: discord.Interaction, owner_id: int):
@@ -1170,22 +1211,34 @@ class GameChooserView(discord.ui.View):
                 ephemeral=True,
             )
             return
+        if not await _require_ticket(interaction):
+            return
         gid, embed = features.start_wordle(self.owner_id)
+        await _append_ticket_footer(embed, self.owner_id)
         await interaction.response.edit_message(embed=embed, view=WordleView(gid, self.owner_id))
 
     @discord.ui.button(label="Đoán số", emoji="🔢", style=discord.ButtonStyle.primary, row=0)
     async def btn_guess_number(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await _require_ticket(interaction):
+            return
         gid, embed = features.start_guess_number(self.owner_id)
+        await _append_ticket_footer(embed, self.owner_id)
         await interaction.response.edit_message(embed=embed, view=GuessNumberView(gid, self.owner_id))
 
     @discord.ui.button(label="Kéo Búa Bao", emoji="✊", style=discord.ButtonStyle.secondary, row=0)
     async def btn_rps(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await _require_ticket(interaction):
+            return
         gid, embed = features.start_rps(self.owner_id)
+        await _append_ticket_footer(embed, self.owner_id)
         await interaction.response.edit_message(embed=embed, view=RPSView(gid, self.owner_id))
 
     @discord.ui.button(label="Trivia (đố vui)", emoji="🧠", style=discord.ButtonStyle.primary, row=1)
     async def btn_trivia(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await _require_ticket(interaction):
+            return
         gid, embed, options = features.start_trivia(self.owner_id)
+        await _append_ticket_footer(embed, self.owner_id)
         await interaction.response.edit_message(embed=embed, view=TriviaView(gid, self.owner_id, options))
 
     @discord.ui.button(label="Tài Xỉu (cược MICK)", emoji="🎲", style=discord.ButtonStyle.danger, row=1)

@@ -339,6 +339,7 @@ async def get_unnotified_video_ids(limit: int = 5) -> list[str]:
 
 DEFAULT_USER = {
     "mick": 0,
+    "ve": 0,  # Vé chơi minigame - user mới được cấp STARTER_TICKETS lần đầu (xem db.get_user)
     "xp": 0,
     "level": 0,
     "last_xp_at": 0,
@@ -350,6 +351,8 @@ DEFAULT_USER = {
     "quest_progress": {},  # {quest_id: count}
     "quest_done": [],  # quest_id đã hoàn thành hôm nay
     "uuid": "",  # UUID riêng, cấp 1 lần duy nhất khi user xuất hiện lần đầu
+    "web_link_reward_claimed": False,  # đã nhận thưởng liên kết Discord trên web chưa
+    "web_rate5_reward_claimed": False,  # đã nhận thưởng đánh giá 5 sao trên web chưa
 }
 
 
@@ -359,11 +362,15 @@ async def get_user(user_id: int) -> dict:
     merged.update(data)
 
     if not merged.get("uuid"):
-        # Cấp UUID riêng cho thành viên ngay lần đầu tra dữ liệu (lazy-init,
-        # không cần script migrate riêng). Chỉ ghi 1 lần vì lần sau đã có uuid.
+        # Cấp UUID riêng + Vé khởi điểm cho thành viên ngay lần đầu tra dữ liệu
+        # (lazy-init, không cần script migrate riêng). Chỉ ghi 1 lần vì lần sau
+        # đã có uuid.
+        from config import STARTER_TICKETS
+
         new_uuid = str(_uuid_lib.uuid4())
         merged["uuid"] = new_uuid
-        await save_user(user_id, {"uuid": new_uuid})
+        merged["ve"] = STARTER_TICKETS
+        await save_user(user_id, {"uuid": new_uuid, "ve": STARTER_TICKETS})
 
     return merged
 

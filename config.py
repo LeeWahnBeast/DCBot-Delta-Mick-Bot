@@ -22,12 +22,23 @@ GUILD_NAME_TEMPLATE = os.environ.get("GUILD_NAME_TEMPLATE", "{nickname} Fan Serv
 
 PORT = int(os.environ.get("PORT", "10000"))
 
-# --- Trang web dạng "Google Play Store" cho bot ---
+# --- Trang web dashboard cho bot ---
 BOT_OWNER_NAME = os.environ.get("BOT_OWNER_NAME", "Lee Wahn Beast")
-# Client ID của Google OAuth (Google Cloud Console > APIs & Services > Credentials
-# > OAuth 2.0 Client IDs > Web application). Dùng cho nút "Đăng nhập Google" để
-# xác thực người đánh giá, chặn 1 người vote nhiều lần bằng tài khoản ảo/xoá cookie.
-GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "")
+# ID Discord của chủ bot - có MICK/Vé vô hạn (economy.py) + hiển thị owner trên web.
+BOT_OWNER_ID = int(os.environ.get("BOT_OWNER_ID", "0") or 0)
+
+# --- Đăng nhập Discord OAuth2 cho trang web (thay cho Google trước đây) ---
+# Tạo app tại https://discord.com/developers/applications > OAuth2, thêm
+# redirect URI trỏ về "<domain-web>/api/discord-callback".
+DISCORD_OAUTH_CLIENT_ID = os.environ.get("DISCORD_OAUTH_CLIENT_ID", "")
+DISCORD_OAUTH_CLIENT_SECRET = os.environ.get("DISCORD_OAUTH_CLIENT_SECRET", "")
+DISCORD_OAUTH_REDIRECT_URI = os.environ.get("DISCORD_OAUTH_REDIRECT_URI", "")
+
+# --- Thưởng MICK trên trang web ---
+# Đánh giá đủ 5 sao (chỉ tính lần đầu/tài khoản) -> +50 MICK.
+RATE_5_STAR_REWARD_MICK = int(os.environ.get("RATE_5_STAR_REWARD_MICK", "50"))
+# Liên kết tài khoản Discord lần đầu trên web -> +50 MICK.
+LINK_DISCORD_REWARD_MICK = int(os.environ.get("LINK_DISCORD_REWARD_MICK", "50"))
 
 
 UA = (
@@ -131,6 +142,14 @@ AI_AUTO_CHAT_QUIET_END_HOUR = int(os.environ.get("AI_AUTO_CHAT_QUIET_END_HOUR", 
 # --- ATM: giữ tiền hộ, tách khỏi ví tiêu xài ---
 ATM_ENABLED = True
 
+# --- Vé: tốn 1 Vé mỗi lần chơi minigame (Wordle/Đoán số/Kéo Búa Bao/Tài Xỉu/
+# Xì Dách/Trivia). Nhận thêm Vé qua /diem-danh (Daily). Chủ bot (BOT_OWNER_ID)
+# có Vé vô hạn, không bao giờ bị trừ. ---
+TICKET_EMOJI = os.environ.get("TICKET_EMOJI", "🎟️")
+GAME_TICKET_COST = int(os.environ.get("GAME_TICKET_COST", "1"))
+STARTER_TICKETS = int(os.environ.get("STARTER_TICKETS", "3"))
+DAILY_TICKET_REWARD = int(os.environ.get("DAILY_TICKET_REWARD", "2"))
+
 # --- Minigame kinh doanh (quán / công ty / nhà trọ / khách sạn) ---
 # income mỗi 30 phút cho MỖI nhân viên đã thuê, theo loại hình
 BUSINESS_INCOME_PER_TICK = {
@@ -138,12 +157,20 @@ BUSINESS_INCOME_PER_TICK = {
     "congty": int(os.environ.get("BIZ_INCOME_CONGTY", "18")),
     "nhatro": int(os.environ.get("BIZ_INCOME_NHATRO", "14")),
     "khachsan": int(os.environ.get("BIZ_INCOME_KHACHSAN", "25")),
+    "hotoc": int(os.environ.get("BIZ_INCOME_HOTOC", "8")),
+    "taphoa": int(os.environ.get("BIZ_INCOME_TAPHOA", "9")),
+    "gym": int(os.environ.get("BIZ_INCOME_GYM", "16")),
+    "chebien": int(os.environ.get("BIZ_INCOME_CHEBIEN", "20")),
 }
 BUSINESS_OPEN_COST = {
     "quan": int(os.environ.get("BIZ_COST_QUAN", "200")),
     "congty": int(os.environ.get("BIZ_COST_CONGTY", "500")),
     "nhatro": int(os.environ.get("BIZ_COST_NHATRO", "350")),
     "khachsan": int(os.environ.get("BIZ_COST_KHACHSAN", "800")),
+    "hotoc": int(os.environ.get("BIZ_COST_HOTOC", "150")),
+    "taphoa": int(os.environ.get("BIZ_COST_TAPHOA", "180")),
+    "gym": int(os.environ.get("BIZ_COST_GYM", "450")),
+    "chebien": int(os.environ.get("BIZ_COST_CHEBIEN", "600")),
 }
 BUSINESS_HIRE_COST = int(os.environ.get("BIZ_HIRE_COST", "100"))
 BUSINESS_MAX_STAFF = int(os.environ.get("BIZ_MAX_STAFF", "5"))

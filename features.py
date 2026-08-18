@@ -48,6 +48,8 @@ from config import (
     TAIXIU_PAYOUT_MULTIPLIER,
     XIDACH_PAYOUT_MULTIPLIER,
     XIDACH_BONUS_MULTIPLIER,
+    DAILY_TICKET_REWARD,
+    TICKET_EMOJI,
     TRIVIA_REWARD_MICK,
     TRIVIA_TIMEOUT_SEC,
 )
@@ -65,7 +67,7 @@ ACHIEVEMENTS: dict[str, dict] = {
     "level_50": {"name": "🏔️ Huyền Thoại", "desc": "Đạt Level 50", "reward": 25, "difficulty": "Khó"},
     "mick_10000": {"name": "💎 Đại Gia MICK", "desc": "Sở hữu 10,000 MICK cùng lúc", "reward": 20, "difficulty": "Khó"},
     "wordle_streak": {"name": "🧠 Bậc Thầy Wordle", "desc": "Thắng Wordle 10 lần", "reward": 15, "difficulty": "Khó"},
-    "business_tycoon": {"name": "🏢 Trùm Kinh Doanh", "desc": "Sở hữu cả 4 loại hình kinh doanh", "reward": 29, "difficulty": "Khó"},
+    "business_tycoon": {"name": "🏢 Trùm Kinh Doanh", "desc": "Sở hữu cả 8 loại hình kinh doanh", "reward": 29, "difficulty": "Khó"},
 
     # --- Dễ (reward > 30) ---
     "first_message": {"name": "👋 Chào Sân", "desc": "Nhắn tin đầu tiên trong server", "reward": 35, "difficulty": "Dễ"},
@@ -203,7 +205,11 @@ QUEST_POOL: dict[str, dict] = {
     "achievement_1_3": {"desc": "Hoàn thành 1-3 thành tựu bất kỳ", "target": 1},
     "ai_hoi_3": {"desc": "Nói `ai hỏi` 3 lần", "target": 3},
     "ghet_tomboy": {"desc": "Nói `tôi ghét tomboy` 1 lần", "target": 1},
-    "depchai_gay": {"desc": "Nói `btw i love depchai because he's gay` 1 lần", "target": 1},
+    "depchai_gay": {
+        "desc": "Nói `Btw, i love <@1011257705031274536> because he's is my girlfriend and gay <3` 1 lần",
+        "target": 1,
+    },
+    "nsc_tree": {"desc": "Nói `i love nsc because he crashed into a tree.` 1 lần", "target": 1},
 }
 
 QUEST_IDS = list(QUEST_POOL.keys())
@@ -349,13 +355,21 @@ async def _handle_claim(interaction: discord.Interaction):
         hours_elapsed = int((time.time() - reset_epoch) // 3600)
         reward = compute_daily_reward(hours_elapsed)
 
-        # Ghi thẳng ở đây (không gọi economy.add_mick) vì đang ở trong
+        # Ghi thẳng ở đây (không gọi economy.add_mick/add_ve) vì đang ở trong
         # user_lock rồi -> asyncio.Lock không reentrant, gọi lại sẽ deadlock.
         new_balance = max(0, user["mick"] + reward)
-        await db.save_user(user_id, {"last_daily_date": today, "mick": new_balance})
+        is_owner = economy.is_owner(user_id)
+        new_ve = user.get("ve", 0) if is_owner else user.get("ve", 0) + DAILY_TICKET_REWARD
+        update = {"last_daily_date": today, "mick": new_balance}
+        if not is_owner:
+            update["ve"] = new_ve
+        await db.save_user(user_id, update)
 
+    ve_display = "∞" if is_owner else str(new_ve)
     await interaction.response.send_message(
-        f"🎁 Bạn đã nhận **{reward} Mick**! (Số dư hiện tại: **{new_balance} MICK**)", ephemeral=True
+        f"🎁 Bạn đã nhận **{reward} Mick** + {TICKET_EMOJI} **{DAILY_TICKET_REWARD} Vé**! "
+        f"(Số dư hiện tại: **{new_balance} MICK** · Vé: **{ve_display}**)",
+        ephemeral=True,
     )
 
     try:
@@ -1089,6 +1103,10 @@ BUSINESS_NAMES = {
     "congty": "🏢 Công ty",
     "nhatro": "🏠 Nhà trọ",
     "khachsan": "🏨 Khách sạn",
+    "hotoc": "💈 Tiệm hớt tóc",
+    "taphoa": "🏪 Tiệm tạp hoá",
+    "gym": "🏋️ Phòng gym",
+    "chebien": "🍱 Xưởng chế biến đồ ăn",
 }
 BUSINESS_KINDS = list(BUSINESS_NAMES.keys())
 

@@ -10,7 +10,15 @@ import asyncio
 from collections import defaultdict
 
 import db
-from config import LEVEL_UP_MICK_REWARD
+from config import LEVEL_UP_MICK_REWARD, BOT_OWNER_ID, GAME_TICKET_COST
+
+# Giá trị hiển thị cho MICK/Vé của chủ bot - không lưu số này xuống DB, chỉ
+# override lúc đọc/trừ để owner luôn thấy/dùng được "vô hạn" (∞).
+INFINITE = float("inf")
+
+
+def is_owner(user_id: int) -> bool:
+    return bool(BOT_OWNER_ID) and user_id == BOT_OWNER_ID
 
 # ---------------------------------------------------------------------------
 # Lock theo user_id: chặn race condition khi cùng 1 user gửi nhiều request
@@ -53,9 +61,14 @@ async def add_xp(user_id: int, amount: int) -> dict:
     return {"level": level, "levels_gained": levels_gained, "mick_awarded": mick_awarded, "xp": xp, "mick": mick}
 
 
-async def add_mick(user_id: int, amount: int) -> int:
+async def add_mick(user_id: int, amount: int) -> int | float:
     """Cộng (hoặc trừ, nếu amount âm) MICK cho user. Trả về số dư mới.
-    Có lock theo user_id để 2 request cùng lúc không đọc/ghi đè lên nhau."""
+    Có lock theo user_id để 2 request cùng lúc không đọc/ghi đè lên nhau.
+
+    Chủ bot (BOT_OWNER_ID) có MICK vô hạn: không bao giờ bị trừ hết, trả về
+    INFINITE (hiển thị "∞" ở embed/web) mà không cần ghi DB."""
+    if is_owner(user_id):
+        return INFINITE
     async with user_lock(user_id):
         user = await db.get_user(user_id)
         new_balance = max(0, user["mick"] + amount)
@@ -63,15 +76,65 @@ async def add_mick(user_id: int, amount: int) -> int:
         return new_balance
 
 
+# ---------------------------------------------------------------------------
+# Vé: dùng để chơi minigame (Wordle/Đoán số/Kéo Búa Bao/Tài Xỉu/Xì Dách/
+# Trivia...). Chủ bot có Vé vô hạn.
+# ---------------------------------------------------------------------------
+
+
+async def get_ve(user_id: int) -> int | float:
+    if is_owner(user_id):
+        return INFINITE
+    user = await db.get_user(user_id)
+    return user.get("ve", 0)
+
+
+async def add_ve(user_id: int, amount: int) -> int | float:
+    """Cộng (hoặc trừ) Vé. Owner luôn vô hạn, không ghi DB."""
+    if is_owner(user_id):
+        return INFINITE
+    async with user_lock(user_id):
+        user = await db.get_user(user_id)
+        new_balance = max(0, user.get("ve", 0) + amount)
+        await db.save_user(user_id, {"ve": new_balance})
+        return new_balance
+
+
+async def spend_game_ticket(user_id: int) -> dict:
+    """Trừ GAME_TICKET_COST Vé để bắt đầu 1 ván minigame. Trả {ok, ve, reason?}.
+    Owner luôn ok, Vé hiển thị "∞"."""
+    if is_owner(user_id):
+        return {"ok": True, "ve": INFINITE}
+    async with user_lock(user_id):
+        user = await db.get_user(user_id)
+        current = user.get("ve", 0)
+        if current < GAME_TICKET_COST:
+            return {"ok": False, "reason": "insufficient_tickets", "ve": current}
+        new_balance = current - GAME_TICKET_COST
+        await db.save_user(user_id, {"ve": new_balance})
+        return {"ok": True, "ve": new_balance}
+
+
+def format_ve(ve: int | float) -> str:
+    return "∞" if ve == INFINITE else str(ve)
+
+
+def format_mick(mick: int | float) -> str:
+    return "∞" if mick == INFINITE else str(mick)
+
+
 async def get_profile(user_id: int) -> dict:
     user = await db.get_user(user_id)
     needed = xp_needed_for_level(user["level"])
+    owner = is_owner(user_id)
     return {
-        "mick": user["mick"],
+        "mick": INFINITE if owner else user["mick"],
+        "ve": INFINITE if owner else user.get("ve", 0),
         "level": user["level"],
         "xp": user["xp"],
         "xp_needed": needed,
         "uuid": user.get("uuid", ""),
+        "is_owner": owner,
     }
 
 
@@ -163,9 +226,12 @@ def transfer_delay_seconds(amount: int) -> float:
 
 
 async def place_bet(user_id: int, amount: int) -> dict:
-    """Trừ tiền cược ngay khi đặt. Trả {ok, reason?, wallet}."""
+    """Trừ tiền cược ngay khi đặt. Trả {ok, reason?, wallet}.
+    Owner có MICK vô hạn nên không bị trừ, luôn được cược."""
     if amount <= 0:
         return {"ok": False, "reason": "invalid_amount"}
+    if is_owner(user_id):
+        return {"ok": True, "wallet": INFINITE}
     async with user_lock(user_id):
         user = await db.get_user(user_id)
         if user["mick"] < amount:
