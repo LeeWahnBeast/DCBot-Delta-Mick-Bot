@@ -100,6 +100,37 @@ async def on_ready():
         voice_xp_loop.start()
 
 
+def get_bot_info() -> dict:
+    """Thông tin bot cho trang web dạng Google Play: tên/avatar lấy trực tiếp
+    từ token đang đăng nhập (client.user), không hardcode. Trả về dict rỗng-an
+    toàn nếu bot chưa kết nối xong (client.user is None trước on_ready)."""
+    user = client.user
+    if user is None:
+        return {
+            "name": "Đang khởi động...",
+            "avatar_url": "",
+            "created_at": None,
+            "guild_count": 0,
+            "member_count": 0,
+            "latency_ms": None,
+            "online": False,
+        }
+
+    guild_count = len(client.guilds)
+    member_count = sum(g.member_count or 0 for g in client.guilds if g.member_count)
+    latency_ms = round(client.latency * 1000) if client.latency and client.latency == client.latency else None
+
+    return {
+        "name": user.name,
+        "avatar_url": user.display_avatar.url,
+        "created_at": user.created_at.isoformat(),
+        "guild_count": guild_count,
+        "member_count": member_count,
+        "latency_ms": latency_ms,
+        "online": client.is_ready() and not client.is_closed(),
+    }
+
+
 def _mention_prefix() -> str:
     return f"{NOTIFY_MENTION} " if NOTIFY_MENTION else ""
 

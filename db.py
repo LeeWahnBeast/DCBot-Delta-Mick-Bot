@@ -338,6 +338,24 @@ async def get_site_stats() -> dict:
     return result
 
 
+async def get_rating_distribution() -> dict[int, int]:
+    """Trả về {1: count, 2: count, ..., 5: count} — dùng vẽ biểu đồ cột kiểu
+    Google Play. Tính trên TOÀN BỘ rating (kể cả review cũ chỉ có số sao)."""
+    if _use_memory_fallback:
+        doc = _memory_store.get("site/dashboard", {"views": 0, "ratings": {}})
+    else:
+        snap = await _client.collection("site").document("dashboard").get()
+        doc = snap.to_dict() or {} if snap.exists else {}
+
+    ratings = doc.get("ratings", {}) or {}
+    dist = {i: 0 for i in range(1, 6)}
+    for r in ratings.values():
+        stars = r["stars"] if isinstance(r, dict) else r
+        stars = max(1, min(5, int(stars)))
+        dist[stars] += 1
+    return dist
+
+
 async def get_reviews(limit: int = 30) -> list[dict]:
     """Trả về danh sách review gần nhất (có tên/sao/comment), mới nhất trước.
     Review cũ (chỉ có số sao, chưa có tên/comment) bị bỏ qua vì không đủ dữ liệu hiển thị."""

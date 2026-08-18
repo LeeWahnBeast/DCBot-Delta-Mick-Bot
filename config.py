@@ -22,6 +22,14 @@ GUILD_NAME_TEMPLATE = os.environ.get("GUILD_NAME_TEMPLATE", "{nickname} Fan Serv
 
 PORT = int(os.environ.get("PORT", "10000"))
 
+# --- Trang web dạng "Google Play Store" cho bot ---
+BOT_OWNER_NAME = os.environ.get("BOT_OWNER_NAME", "Lee Wahn Beast")
+# Client ID của Google OAuth (Google Cloud Console > APIs & Services > Credentials
+# > OAuth 2.0 Client IDs > Web application). Dùng cho nút "Đăng nhập Google" để
+# xác thực người đánh giá, chặn 1 người vote nhiều lần bằng tài khoản ảo/xoá cookie.
+GOOGLE_OAUTH_CLIENT_ID = os.environ.get("GOOGLE_OAUTH_CLIENT_ID", "")
+
+
 UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
