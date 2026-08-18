@@ -27,6 +27,9 @@ from config import (
     NOTIFY_MENTION,
     CHECK_INTERVAL_SEC,
     IDENTITY_SYNC_INTERVAL_SEC,
+    AI_GUESS_MEANING_INTERVAL_SEC,
+    AI_GUESS_MEANING_BATCH_SIZE,
+    AI_GUESS_MEANING_MIN_COUNT,
     GUILD_NAME_TEMPLATE,
     DAILY_CHANNEL_ID,
     XP_MIN_PER_MESSAGE,
@@ -103,6 +106,7 @@ async def on_ready():
         voice_xp_loop.start()
     if not learn_word_flush_loop.is_running():
         learn_word_flush_loop.start()
+        guess_meaning_loop.start()
 
 
 def get_bot_info() -> dict:
@@ -481,6 +485,27 @@ async def learn_word_flush_loop():
 
 @learn_word_flush_loop.before_loop
 async def before_learn_word_flush_loop():
+    await client.wait_until_ready()
+
+
+# Định kỳ nhờ AI đoán nghĩa hàng loạt cho top từ đã "học" (đếm tần suất)
+# nhưng chưa có nghĩa -> có nghĩa thì mới được _build_slang_context() dùng
+# trong AI chat. Chỉ 1 lượt Groq call cho cả batch, không đoán từng từ riêng.
+@tasks.loop(seconds=AI_GUESS_MEANING_INTERVAL_SEC)
+async def guess_meaning_loop():
+    try:
+        n = await ai_chat.guess_meanings_for_top_words(
+            batch_size=AI_GUESS_MEANING_BATCH_SIZE,
+            min_count=AI_GUESS_MEANING_MIN_COUNT,
+        )
+        if n:
+            log.info("AI đã tự đoán nghĩa cho %d từ mới.", n)
+    except Exception as e:
+        log.warning("Đoán nghĩa từ định kỳ lỗi: %s", e)
+
+
+@guess_meaning_loop.before_loop
+async def before_guess_meaning_loop():
     await client.wait_until_ready()
 
 

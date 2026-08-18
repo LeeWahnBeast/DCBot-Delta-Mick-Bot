@@ -134,6 +134,13 @@ AI_AUTO_CHAT_INTERVAL_SEC = int(os.environ.get("AI_AUTO_CHAT_INTERVAL_SEC", str(
 # Chỉ tự nhắn nếu có người thật (không phải bot) chat trong kênh trong khoảng thời gian này
 AI_AUTO_CHAT_REQUIRE_ACTIVITY_SEC = int(os.environ.get("AI_AUTO_CHAT_REQUIRE_ACTIVITY_SEC", str(60 * 60)))
 AI_LEARN_MIN_WORD_LEN = int(os.environ.get("AI_LEARN_MIN_WORD_LEN", "3"))
+# Định kỳ nhờ AI đoán nghĩa hàng loạt cho top từ đã học nhiều lần nhưng chưa
+# có nghĩa (xem ai_chat.guess_meanings_for_top_words). Mặc định 6 tiếng/lần,
+# mỗi lần tối đa 20 từ/1 call Groq, chỉ đoán từ đã gặp >= 3 lần (lọc bớt từ
+# gõ nhầm/ngẫu nhiên chỉ xuất hiện 1-2 lần, không đáng tốn call để đoán).
+AI_GUESS_MEANING_INTERVAL_SEC = int(os.environ.get("AI_GUESS_MEANING_INTERVAL_SEC", str(6 * 3600)))
+AI_GUESS_MEANING_BATCH_SIZE = int(os.environ.get("AI_GUESS_MEANING_BATCH_SIZE", "20"))
+AI_GUESS_MEANING_MIN_COUNT = int(os.environ.get("AI_GUESS_MEANING_MIN_COUNT", "3"))
 # Khung giờ "ngủ" - bot KHÔNG tự nhắn trong khung này (giờ VN, 0-23). Mặc định
 # 0h -> 3h sáng, tránh spam lúc đêm khuya không ai đọc.
 AI_AUTO_CHAT_QUIET_START_HOUR = int(os.environ.get("AI_AUTO_CHAT_QUIET_START_HOUR", "0"))
