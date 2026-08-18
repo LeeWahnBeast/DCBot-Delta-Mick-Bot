@@ -554,8 +554,10 @@ async def on_message(message: discord.Message):
             await _bump_quest_and_notify(message, qid)
 
     # Học từ mới trong server (không chặn xử lý chính, chỉ cộng dồn vào RAM -
-    # xem learn_word_flush_loop để biết khi nào thật sự ghi Firestore)
-    _fire_and_forget(ai_chat.learn_from_message(content), "Học từ lỗi")
+    # xem learn_word_flush_loop để biết khi nào thật sự ghi lên Firebase).
+    # Chỉ học khi server đủ đông (xem AI_LEARN_MIN_MEMBERS trong config.py).
+    member_count = message.guild.member_count or 0
+    _fire_and_forget(ai_chat.learn_from_message(content, member_count), "Học từ lỗi")
 
     # Thành tựu: tin nhắn đầu tiên
     asyncio.create_task(_check_first_message_achievement(message))

@@ -35,12 +35,19 @@ UA = (
     "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-# --- Firestore ---
+# --- Firebase Realtime Database ---
 # Cách 1 (khuyên dùng trên Render): dán nguyên nội dung file JSON service account
 # vào biến môi trường FIREBASE_CREDENTIALS_JSON.
 # Cách 2: set sẵn GOOGLE_APPLICATION_CREDENTIALS trỏ tới file JSON trên máy/server.
 FIREBASE_CREDENTIALS_JSON = os.environ.get("FIREBASE_CREDENTIALS_JSON", "")
-FIRESTORE_PROJECT_ID = os.environ.get("FIRESTORE_PROJECT_ID", "") or None
+# Bắt buộc: URL database dạng "https://<project-id>-default-rtdb.<region>.firebasedatabase.app"
+# (lấy trong Firebase Console > Realtime Database > tab Data, góc trên bên trái).
+FIREBASE_DATABASE_URL = os.environ.get("FIREBASE_DATABASE_URL", "").rstrip("/")
+
+# --- Học từ trong chat ---
+# Chỉ cho bot "học từ" (đếm tần suất từ lạ vào ai_words) khi server có TỐI
+# THIỂU chừng này thành viên - tránh học/ghi DB vô ích ở server nhỏ/test.
+AI_LEARN_MIN_MEMBERS = int(os.environ.get("AI_LEARN_MIN_MEMBERS", "15"))
 
 # --- Kinh tế: MICK + Level ---
 CURRENCY_NAME = "MICK"

@@ -24,6 +24,7 @@ from config import (
     GROQ_API_KEY,
     GROQ_MODEL,
     AI_LEARN_MIN_WORD_LEN,
+    AI_LEARN_MIN_MEMBERS,
     log,
 )
 
@@ -132,12 +133,18 @@ _pending_word_last_seen: dict[str, int] = {}
 _PENDING_WORD_CAP = 500  # chặn RAM phình nếu chat cực đông mà chưa kịp flush
 
 
-async def learn_from_message(content: str) -> None:
+async def learn_from_message(content: str, member_count: int = 0) -> None:
     """Ghi nhận tần suất từ lạ xuất hiện trong chat (chỉ cộng dồn vào RAM, xem
-    flush_learned_words() để biết khi nào thật sự ghi Firestore). KHÔNG tự gọi
-    AI tra nghĩa (đã bỏ để giảm số lần gọi Groq mỗi tin nhắn -> giảm CPU/độ trễ
-    nền); nghĩa của từ chỉ được lưu khi member chủ động dạy qua `/từ-điển`
-    (xem teach_word)."""
+    flush_learned_words() để biết khi nào thật sự ghi lên Firebase). KHÔNG tự
+    gọi AI tra nghĩa (đã bỏ để giảm số lần gọi Groq mỗi tin nhắn -> giảm CPU/độ
+    trễ nền); nghĩa của từ chỉ được lưu khi member chủ động dạy qua `/từ-điển`
+    (xem teach_word).
+
+    Chỉ "học" khi server có TỐI THIỂU AI_LEARN_MIN_MEMBERS thành viên (mặc
+    định 15) - server nhỏ/test thì bỏ qua, tránh học/ghi DB vô ích."""
+    if member_count < AI_LEARN_MIN_MEMBERS:
+        return
+
     words = {w.lower() for w in _WORD_RE.findall(content) if len(w) >= AI_LEARN_MIN_WORD_LEN}
     words -= _STOPWORDS
     if not words:

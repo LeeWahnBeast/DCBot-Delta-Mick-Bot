@@ -14,6 +14,7 @@ import asyncio
 from config import DISCORD_TOKEN, DISCORD_CHANNEL_ID, log
 from discord_bot import client
 from web_server import start_web_server
+import db
 
 
 async def main():
@@ -21,6 +22,11 @@ async def main():
         raise RuntimeError("Thiếu biến môi trường DISCORD_TOKEN")
     if not DISCORD_CHANNEL_ID:
         raise RuntimeError("Thiếu biến môi trường DISCORD_CHANNEL_ID")
+
+    # Làm nóng access token Firebase TRƯỚC khi web server nhận request đầu
+    # tiên (xem db.warmup) - tránh lỗi/chậm ở request/health-check đầu tiên
+    # ngay lúc vừa deploy.
+    await db.warmup()
 
     await start_web_server()
     async with client:
