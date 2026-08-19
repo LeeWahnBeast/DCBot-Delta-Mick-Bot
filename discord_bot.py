@@ -616,9 +616,12 @@ def _fire_and_forget(coro, err_label: str):
     return asyncio.create_task(_runner())
 
 
-async def _announce_level_up(member: discord.Member, result: dict):
-    """Thông báo lên level (dùng chung cho XP nhắn tin lẫn XP voice chat)."""
-    channel = await _get_channel()
+async def _announce_level_up(member: discord.Member, result: dict, channel=None):
+    """Thông báo lên level (dùng chung cho XP nhắn tin lẫn XP voice chat).
+    channel=None -> tự lấy kênh chat chính (AI_CHAT_CHANNEL_ID), KHÔNG dùng
+    kênh TikTok (DISCORD_CHANNEL_ID) - 2 kênh này phục vụ mục đích khác nhau."""
+    if channel is None:
+        channel = await _get_channel(AI_CHAT_CHANNEL_ID)
     if channel is None:
         return
     try:
