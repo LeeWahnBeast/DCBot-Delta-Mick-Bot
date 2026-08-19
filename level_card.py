@@ -1,14 +1,20 @@
 """
-Render ảnh "level card" cho lệnh /level theo phong cách Google Material You 3:
-- Dynamic color: màu chủ đạo được lấy ra từ avatar của người dùng (giống cách
-  Material You tạo bảng màu từ ảnh nền/avatar điện thoại), rồi suy ra tông
-  sáng/tối/nhạt để tô nền, khung avatar và thanh XP.
-- Gradient mềm giữa 2 sắc độ của màu chủ đạo (không dùng nền xám phẳng cũ).
-- Bo góc lớn (card, avatar, thanh XP, "pill" Level đều bo tròn kiểu M3).
-- Typography: tên = chữ đậm cỡ lớn, phụ đề (Level/XP) = chữ cỡ nhỏ hơn, có
-  tương phản rõ để dễ đọc trên nền gradient.
-- Thanh XP đặt ở HÀNG RIÊNG, có khoảng đệm cố định phía trên/dưới avatar +
-  tên, không bao giờ chồng lên avatar hay chữ (đây là lỗi bản cũ).
+Render ảnh "level card" cho lệnh /level - UI dạng thẻ nền tối phẳng (dark
+card), bố cục:
+
+  [Avatar tròn]   LEVEL {level}      RANK {rank}
+                  {tên hiển thị}
+                  ─────────────────────  {xp} / {xp_needed}
+                  [======thanh XP======]
+
+- "Level" ở đây LUÔN là cấp độ (level) của NGƯỜI DÙNG, tính từ XP nhắn tin/
+  voice chat - không liên quan gì tới "material"/nguyên liệu; xem hàm
+  render_level_card() bên dưới.
+- Avatar tròn hoàn toàn (khác bản cũ dùng squircle bo góc).
+- "RANK n" lấy từ thứ hạng trên bảng xếp hạng toàn server (theo Level), do
+  caller tự tính và truyền vào qua tham số `rank`.
+- xp_needed hiển thị rút gọn kiểu "6.5K" khi >= 1000 cho gọn, giống UI tham
+  khảo, nhưng xp hiện tại vẫn hiện số đầy đủ để không gây hiểu lầm.
 
 Font dùng DejaVu Sans (bundle sẵn trong assets/fonts/) chứ không dựa vào font
 hệ thống, vì môi trường Render (Linux, free tier) không đảm bảo có sẵn font
@@ -20,7 +26,6 @@ from __future__ import annotations
 
 import io
 import os
-import colorsys
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 import aiohttp
@@ -39,17 +44,19 @@ if not os.path.exists(_FONT_BOLD_PATH) or not os.path.exists(_FONT_REGULAR_PATH)
 # không có file thì bot tự chuyển sang embed text thay vì báo lỗi.
 LEVEL_UP_IMAGE_PATH = os.path.join(os.path.dirname(__file__), "assets", "levelup.png")
 
-# --- Kích thước card theo tỉ lệ M3 "wide card" ---
-_W, _H = 1000, 320
-_PAD = 44
+# --- Kích thước card (dark card, tỉ lệ ~3:1) ---
+_W, _H = 934, 294
+_PAD = 40
 _AVATAR_SIZE = 176
-_CARD_RADIUS = 40
-_AVATAR_RADIUS = 44  # squircle-ish, không bo tròn hoàn toàn -> đúng chất M3
-_BAR_HEIGHT = 26
+_CARD_RADIUS = 28
+_BAR_HEIGHT = 14
 _BAR_RADIUS = _BAR_HEIGHT // 2
 
 _WHITE = (255, 255, 255)
-_FALLBACK_SEED = (103, 80, 164)  # tím Material mặc định khi không lấy được màu từ avatar
+_CARD_BG = (30, 31, 34)       # nền thẻ tối, kiểu Discord dark
+_TRACK_COLOR = (60, 61, 66)   # nền thanh XP (chưa fill)
+_ACCENT = (255, 255, 255)     # màu fill thanh XP + viền avatar
+_SUBTEXT = (170, 172, 178)
 
 
 def _font(path: str, size: int) -> ImageFont.FreeTypeFont:
@@ -93,55 +100,14 @@ async def _download_avatar_bytes(avatar_url: str) -> bytes | None:
     return None
 
 
-def _extract_seed_color(avatar_img: Image.Image) -> tuple[int, int, int]:
-    """Lấy màu chủ đạo (dynamic color) từ avatar bằng cách quantize xuống ít
-    màu rồi chọn màu có tỉ lệ pixel lớn nhất, mô phỏng thuật toán Material You."""
-    try:
-        small = avatar_img.convert("RGB").resize((48, 48))
-        quantized = small.quantize(colors=6, method=Image.MEDIANCUT)
-        palette = quantized.getpalette()
-        color_counts = sorted(quantized.getcolors(), reverse=True)
-        for count, idx in color_counts:
-            r, g, b = palette[idx * 3: idx * 3 + 3]
-            h, s, v = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
-            # bỏ qua màu gần trắng/đen/xám thuần vì không tạo được gradient đẹp
-            if s > 0.15 and 0.12 < v < 0.95:
-                return (r, g, b)
-        r, g, b = palette[color_counts[0][1] * 3: color_counts[0][1] * 3 + 3]
-        return (r, g, b)
-    except Exception:
-        return _FALLBACK_SEED
-
-
-def _tone(rgb: tuple[int, int, int], lightness_delta: float, sat_mult: float = 1.0) -> tuple[int, int, int]:
-    """Trả về 1 sắc độ (tone) khác của cùng 1 hue — dùng để build gradient/khung/pill
-    kiểu 'tonal palette' của Material You mà không cần thư viện màu sắc riêng."""
-    h, s, v = colorsys.rgb_to_hsv(*(c / 255 for c in rgb))
-    v = max(0.0, min(1.0, v + lightness_delta))
-    s = max(0.0, min(1.0, s * sat_mult))
-    r, g, b = colorsys.hsv_to_rgb(h, s, v)
-    return (int(r * 255), int(g * 255), int(b * 255))
-
-
-def _make_gradient_bg(size: tuple[int, int], color_top: tuple[int, int, int], color_bottom: tuple[int, int, int]) -> Image.Image:
-    w, h = size
-    base = Image.new("RGB", (1, h), color_top)
-    top = colorsys.rgb_to_hsv(*(c / 255 for c in color_top))
-    bottom = colorsys.rgb_to_hsv(*(c / 255 for c in color_bottom))
-    for y in range(h):
-        t = y / max(1, h - 1)
-        h_ = top[0] + (bottom[0] - top[0]) * t
-        s_ = top[1] + (bottom[1] - top[1]) * t
-        v_ = top[2] + (bottom[2] - top[2]) * t
-        r, g, b = colorsys.hsv_to_rgb(h_, s_, v_)
-        base.putpixel((0, y), (int(r * 255), int(g * 255), int(b * 255)))
-    return base.resize((w, h))
-
-
-def _readable_text_color(bg_rgb: tuple[int, int, int]) -> tuple[int, int, int]:
-    r, g, b = bg_rgb
-    luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
-    return (20, 18, 24) if luminance > 0.6 else _WHITE
+def _format_short_number(n: int) -> str:
+    """Rút gọn số lớn kiểu '6.5K' cho gọn (chỉ dùng cho xp_needed hiển thị,
+    xp hiện tại vẫn hiện đầy đủ để tránh hiểu lầm số liệu)."""
+    if n < 1000:
+        return str(n)
+    value = n / 1000
+    text = f"{value:.1f}".rstrip("0").rstrip(".")
+    return f"{text}K"
 
 
 async def render_level_card(
@@ -150,50 +116,41 @@ async def render_level_card(
     level: int,
     xp: int,
     xp_needed: int,
+    rank: int | None = None,
 ) -> io.BytesIO:
-    """Render 1 level card PNG theo phong cách Material You 3, trả về BytesIO
-    sẵn sàng gửi qua discord.File."""
+    """Render 1 level card PNG dạng thẻ nền tối phẳng, trả về BytesIO sẵn sàng
+    gửi qua discord.File. `level` luôn là level của người dùng đang xem (hoặc
+    người được tra); `rank` là thứ hạng của họ trên bảng xếp hạng server theo
+    Level (None nếu caller không có/không cần hiển thị)."""
 
     avatar_bytes = await _download_avatar_bytes(avatar_url)
     avatar_img: Image.Image | None = None
-    seed_color = _FALLBACK_SEED
     if avatar_bytes:
         try:
             avatar_img = Image.open(io.BytesIO(avatar_bytes)).convert("RGB")
-            seed_color = _extract_seed_color(avatar_img)
         except Exception:
             avatar_img = None
 
-    # --- Bảng tông màu (tonal palette) suy ra từ dynamic color ---
-    bg_top = _tone(seed_color, lightness_delta=0.30, sat_mult=0.55)
-    bg_bottom = _tone(seed_color, lightness_delta=-0.05, sat_mult=0.85)
-    accent = _tone(seed_color, lightness_delta=0.05, sat_mult=1.0)
-    surface = _tone(seed_color, lightness_delta=0.42, sat_mult=0.30)  # nền "container" nhạt cho thanh XP
-    text_color = _readable_text_color(bg_top)
-    if text_color == _WHITE:
-        subtext_color = tuple(max(0, c - 45) for c in _WHITE)
-    else:
-        subtext_color = tuple(min(255, c + 60) for c in text_color)
-
-    card = _make_gradient_bg((_W, _H), bg_top, bg_bottom)
+    card = Image.new("RGB", (_W, _H), _CARD_BG)
     draw = ImageDraw.Draw(card)
 
-    # --- Avatar: khung "squircle" bo góc lớn kiểu M3, viền nhẹ theo accent ---
+    # --- Avatar: tròn hoàn toàn, viền trắng mảnh ---
     avatar_x = _PAD
-    avatar_y = (_H - _BAR_HEIGHT - 56 - _AVATAR_SIZE) // 2 + 6
-    ring_pad = 6
+    avatar_y = (_H - _AVATAR_SIZE) // 2
+    ring_pad = 4
     ring_box = (
         avatar_x - ring_pad,
         avatar_y - ring_pad,
         avatar_x + _AVATAR_SIZE + ring_pad,
         avatar_y + _AVATAR_SIZE + ring_pad,
     )
-    draw.rounded_rectangle(ring_box, radius=_AVATAR_RADIUS + ring_pad, fill=accent)
+    draw.ellipse(ring_box, fill=_ACCENT)
 
     if avatar_img is not None:
         try:
             fitted = ImageOps.fit(avatar_img, (_AVATAR_SIZE, _AVATAR_SIZE))
-            avatar_mask = _rounded_mask((_AVATAR_SIZE, _AVATAR_SIZE), _AVATAR_RADIUS)
+            avatar_mask = Image.new("L", (_AVATAR_SIZE, _AVATAR_SIZE), 0)
+            ImageDraw.Draw(avatar_mask).ellipse([(0, 0), (_AVATAR_SIZE, _AVATAR_SIZE)], fill=255)
             card.paste(fitted, (avatar_x, avatar_y), avatar_mask)
         except Exception:
             pass
@@ -201,51 +158,45 @@ async def render_level_card(
     # --- Cột chữ bên phải avatar ---
     text_x = avatar_x + _AVATAR_SIZE + 40
     text_max_width = _W - _PAD - text_x
+    top_y = avatar_y + 6
 
-    # "Level N" pill nhỏ phía trên tên, đúng ngôn ngữ M3 (badge/chip bo tròn)
+    # Hàng trên cùng: "LEVEL n" bên trái, "RANK n" đẩy sát mép phải card
+    level_font = _font(_FONT_BOLD_PATH, 34)
     level_text = f"LEVEL {level}"
-    chip_font = _font(_FONT_BOLD_PATH, 22)
-    chip_bbox = draw.textbbox((0, 0), level_text, font=chip_font)
-    chip_text_w = chip_bbox[2] - chip_bbox[0]
-    chip_text_h = chip_bbox[3] - chip_bbox[1]
-    chip_pad_x, chip_pad_y = 20, 10
-    chip_y0 = avatar_y + 4
-    chip_box = (text_x, chip_y0, text_x + chip_text_w + chip_pad_x * 2, chip_y0 + chip_text_h + chip_pad_y * 2 + 6)
-    draw.rounded_rectangle(chip_box, radius=(chip_box[3] - chip_box[1]) // 2, fill=surface)
-    draw.text((text_x + chip_pad_x, chip_y0 + chip_pad_y - 2), level_text, font=chip_font, fill=_tone(seed_color, -0.25, 1.0))
+    draw.text((text_x, top_y), level_text, font=level_font, fill=_WHITE)
 
-    # Tên hiển thị (chữ đậm, cỡ lớn, tự co nếu dài)
-    name_font = _fit_text(draw, display_name, _FONT_BOLD_PATH, text_max_width, start_size=54)
-    name_y = chip_box[3] + 18
-    draw.text((text_x, name_y), display_name, font=name_font, fill=text_color)
+    if rank is not None:
+        rank_text = f"RANK {rank}"
+        rank_bbox = draw.textbbox((0, 0), rank_text, font=level_font)
+        rank_w = rank_bbox[2] - rank_bbox[0]
+        draw.text((_W - _PAD - rank_w, top_y), rank_text, font=level_font, fill=_WHITE)
 
-    # --- Thanh XP: hàng RIÊNG ở đáy card, cách xa khối avatar/tên phía trên ---
-    bar_x0 = _PAD
+    # Tên hiển thị, ngay dưới hàng Level/Rank, tự co cỡ chữ nếu tên dài
+    name_font = _fit_text(draw, display_name, _FONT_BOLD_PATH, text_max_width, start_size=40, min_size=20)
+    name_y = top_y + 52
+    draw.text((text_x, name_y), display_name, font=name_font, fill=_WHITE)
+
+    # --- Thanh XP: hàng riêng dưới cùng cột chữ, số liệu "xp / xp_needed"
+    # canh phải ngay phía trên thanh, giống UI tham khảo ---
+    bar_x0 = text_x
     bar_x1 = _W - _PAD
-    bar_y1 = _H - _PAD
+    bar_y1 = avatar_y + _AVATAR_SIZE
     bar_y0 = bar_y1 - _BAR_HEIGHT
     bar_width = bar_x1 - bar_x0
     progress = min(1.0, xp / xp_needed) if xp_needed else 0.0
     fill_width = max(_BAR_HEIGHT, int(bar_width * progress)) if progress > 0 else 0
 
-    # Nhãn "x / y XP" nằm NGAY TRÊN thanh, đủ khoảng cách cố định — không bao
-    # giờ đụng avatar vì avatar dừng lại ở avatar_y + _AVATAR_SIZE, còn label
-    # này neo theo bar_y0 (đáy card), tách biệt hoàn toàn hai khối.
-    info_font = _font(_FONT_REGULAR_PATH, 24)
-    xp_text = f"{xp} / {xp_needed} XP"
-    label_y = bar_y0 - 34
-    draw.text((bar_x0, label_y), xp_text, font=info_font, fill=subtext_color)
+    info_font = _font(_FONT_REGULAR_PATH, 22)
+    xp_text = f"{xp} / {_format_short_number(xp_needed)}"
+    xp_bbox = draw.textbbox((0, 0), xp_text, font=info_font)
+    xp_w = xp_bbox[2] - xp_bbox[0]
+    label_y = bar_y0 - 32
+    draw.text((bar_x1 - xp_w, label_y), xp_text, font=info_font, fill=_SUBTEXT)
 
-    pct_text = f"{int(progress * 100)}%"
-    pct_bbox = draw.textbbox((0, 0), pct_text, font=info_font)
-    pct_w = pct_bbox[2] - pct_bbox[0]
-    draw.text((bar_x1 - pct_w, label_y), pct_text, font=info_font, fill=subtext_color)
-
-    # Track (nền thanh) + fill (tiến độ), bo tròn hoàn toàn kiểu M3 progress bar
-    draw.rounded_rectangle([(bar_x0, bar_y0), (bar_x1, bar_y1)], radius=_BAR_RADIUS, fill=surface)
+    draw.rounded_rectangle([(bar_x0, bar_y0), (bar_x1, bar_y1)], radius=_BAR_RADIUS, fill=_TRACK_COLOR)
     if fill_width > 0:
         draw.rounded_rectangle(
-            [(bar_x0, bar_y0), (bar_x0 + fill_width, bar_y1)], radius=_BAR_RADIUS, fill=accent
+            [(bar_x0, bar_y0), (bar_x0 + fill_width, bar_y1)], radius=_BAR_RADIUS, fill=_ACCENT
         )
 
     # --- Bo góc lớn cho toàn bộ card ---

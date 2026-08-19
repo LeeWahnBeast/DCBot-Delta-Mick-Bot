@@ -97,6 +97,11 @@ GUESS_NUMBER_REWARD = int(os.environ.get("GUESS_NUMBER_REWARD", "12"))
 GUESS_NUMBER_MAX = int(os.environ.get("GUESS_NUMBER_MAX", "100"))
 GUESS_NUMBER_MAX_TRIES = int(os.environ.get("GUESS_NUMBER_MAX_TRIES", "7"))
 RPS_WIN_REWARD = int(os.environ.get("RPS_WIN_REWARD", "6"))
+# 3 minigame mới: Chẵn Lẻ, Đoán Màu, Vòng Quay May Mắn
+CHANLE_WIN_REWARD = int(os.environ.get("CHANLE_WIN_REWARD", "6"))
+DOANMAU_WIN_REWARD = int(os.environ.get("DOANMAU_WIN_REWARD", "10"))
+# Vòng Quay May Mắn không có thua - random 1 trong các mốc thưởng này mỗi lượt quay.
+VONGQUAY_REWARD_TIERS = [3, 5, 8, 10, 15, 20]
 # Ván minigame đã kết thúc vẫn tra được bằng ID trong khoảng thời gian này (giây)
 GAME_LOOKUP_TTL_SEC = int(os.environ.get("GAME_LOOKUP_TTL_SEC", "600"))
 
@@ -121,6 +126,9 @@ TRANSFER_OTP_MAX_ATTEMPTS = int(os.environ.get("TRANSFER_OTP_MAX_ATTEMPTS", "3")
 MICKCOIN_EMOJI = os.environ.get("MICKCOIN_EMOJI", "<:mickcoin:1538841771935531038>")
 QUEST_CHANNEL_ID = int(os.environ.get("QUEST_CHANNEL_ID", "1528590477073584138"))
 AI_CHAT_CHANNEL_ID = int(os.environ.get("AI_CHAT_CHANNEL_ID", "1528590477073584138"))
+# Kênh log cập nhật bot: mỗi lần version bump (xem versioning.py), AI viết
+# tóm tắt cập nhật ngắn rồi bot tự đăng vào đây.
+UPDATE_LOG_CHANNEL_ID = int(os.environ.get("UPDATE_LOG_CHANNEL_ID", "1539484617663324230"))
 
 # --- Chuyển MICK (transfer): tiền càng cao, thời gian xử lý càng lâu ---
 TRANSFER_SECONDS_PER_MICK = float(os.environ.get("TRANSFER_SECONDS_PER_MICK", "0.05"))  # 0.05s/1 MICK
@@ -165,7 +173,7 @@ AI_AUTO_CHAT_QUIET_END_HOUR = int(os.environ.get("AI_AUTO_CHAT_QUIET_END_HOUR", 
 ATM_ENABLED = True
 
 # --- Vé: tốn 1 Vé mỗi lần chơi minigame (Wordle/Đoán số/Kéo Búa Bao/Tài Xỉu/
-# Xì Dách/Trivia). Nhận thêm Vé qua /diem-danh (Daily). Chủ bot (BOT_OWNER_ID)
+# Xì Dách/Trivia). Nhận thêm Vé qua /daily (Daily). Chủ bot (BOT_OWNER_ID)
 # có Vé vô hạn, không bao giờ bị trừ. ---
 TICKET_EMOJI = os.environ.get("TICKET_EMOJI", "🎟️")
 GAME_TICKET_COST = int(os.environ.get("GAME_TICKET_COST", "1"))

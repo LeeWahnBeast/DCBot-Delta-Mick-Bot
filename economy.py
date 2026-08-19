@@ -115,12 +115,18 @@ async def spend_game_ticket(user_id: int) -> dict:
         return {"ok": True, "ve": new_balance}
 
 
+# Số hiển thị cho owner thay vì ký hiệu "∞" - CHỈ là số hiển thị (cosmetic),
+# số dư thật trong Firebase của owner vẫn chỉ có vài MICK/Vé như bình thường
+# (add_mick/add_ve/spend_game_ticket ở trên không ghi INFINITE xuống DB).
+OWNER_DISPLAY_AMOUNT = 9999999999
+
+
 def format_ve(ve: int | float) -> str:
-    return "∞" if ve == INFINITE else str(ve)
+    return str(OWNER_DISPLAY_AMOUNT) if ve == INFINITE else str(ve)
 
 
 def format_mick(mick: int | float) -> str:
-    return "∞" if mick == INFINITE else str(mick)
+    return str(OWNER_DISPLAY_AMOUNT) if mick == INFINITE else str(mick)
 
 
 async def get_profile(user_id: int) -> dict:

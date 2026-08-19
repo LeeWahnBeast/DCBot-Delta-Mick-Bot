@@ -174,6 +174,59 @@ async def generate_auto_message() -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# Tóm tắt cập nhật bot: mỗi lần version bump (xem versioning.py), AI đọc danh
+# sách file .py vừa đổi/thêm/xoá rồi viết lại thành 1 đoạn "changelog" ngắn,
+# dễ hiểu cho người không phải dev - gửi vào kênh log cập nhật riêng.
+# ---------------------------------------------------------------------------
+
+
+async def summarize_bot_update(
+    old_version: float, new_version: float, changed_paths: list[str], removed_paths: list[str]
+) -> str:
+    """Nhờ AI viết 1 đoạn changelog ngắn dựa trên danh sách file mã nguồn vừa
+    đổi/thêm/xoá. Nếu không gọi được Groq (thiếu API key, lỗi mạng...) thì tự
+    rớt về 1 bản liệt kê file thuần (không có gì gọi AI cũng không lỗi)."""
+    changed_list = "\n".join(f"- {p}" for p in changed_paths) or "(không có)"
+    removed_list = "\n".join(f"- {p}" for p in removed_paths) or "(không có)"
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Bạn là trợ lý viết changelog cho 1 bot Discord tên Mick Bot. "
+                "Dựa vào danh sách TÊN FILE mã nguồn Python vừa thay đổi (không có nội dung "
+                "diff chi tiết), hãy đoán và viết 1 đoạn changelog ngắn gọn (3-6 dòng, tiếng "
+                "Việt, dùng gạch đầu dòng), nêu khả năng những tính năng/module nào vừa được "
+                "cập nhật dựa theo tên file (vd: discord_bot.py -> lệnh/slash command, "
+                "economy.py -> hệ kinh tế MICK, features.py -> minigame/quest/daily, "
+                "level_card.py -> ảnh level card, db.py -> lưu trữ dữ liệu, ai_chat.py -> AI "
+                "chat, web_server.py -> dashboard web...). Không bịa chi tiết cụ thể không "
+                "suy ra được từ tên file, chỉ nói chung chung kiểu 'có khả năng đã cập nhật...'. "
+                "Không thêm lời chào hay lời dẫn thừa, vào thẳng nội dung changelog."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Bot vừa cập nhật từ version {old_version:.2f} lên {new_version:.2f}.\n\n"
+                f"File thay đổi/thêm mới:\n{changed_list}\n\n"
+                f"File bị xoá:\n{removed_list}"
+            ),
+        },
+    ]
+    result = await _groq_chat(messages)
+    if result:
+        return _sanitize_ai_output(result)
+
+    lines = [f"📦 Cập nhật version **{old_version:.2f} → {new_version:.2f}**", "File thay đổi:"]
+    lines += [f"- `{p}`" for p in changed_paths[:15]]
+    if removed_paths:
+        lines.append("File bị xoá:")
+        lines += [f"- `{p}`" for p in removed_paths[:10]]
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Học từ: ghi nhận tần suất + tra nghĩa + lưu DB
 # ---------------------------------------------------------------------------
 

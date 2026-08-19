@@ -45,6 +45,7 @@ from config import (
     VOICE_XP_MAX_PER_TICK,
     VOICE_XP_MIN_MEMBERS,
     AI_CHAT_CHANNEL_ID,
+    UPDATE_LOG_CHANNEL_ID,
     AI_AUTO_CHAT_INTERVAL_SEC,
     AI_AUTO_CHAT_REQUIRE_ACTIVITY_SEC,
     AI_AUTO_CHAT_QUIET_START_HOUR,
@@ -116,8 +117,14 @@ async def on_ready():
     if not _version_checked:
         _version_checked = True
         try:
+            old_version = _bot_version
             result = await versioning.check_and_bump_version()
             _bot_version = result["version"]
+            if result.get("bumped"):
+                _fire_and_forget(
+                    _announce_bot_update(old_version, result),
+                    "Đăng thông báo cập nhật bot lỗi",
+                )
         except Exception as e:
             log.warning("Kiểm tra version bot lỗi: %s", e)
 
@@ -521,15 +528,15 @@ async def _announce_level_up(member: discord.Member, result: dict, channel=None)
     if channel is None:
         return
     try:
-        text = (
-            f"🎉 {member.mention} đã lên **Level {result['level']}**! "
-            f"Nhận **{result['mick_awarded']} MICK**. (từ voice chat 🎙️)"
-        )
+        text = f"{member.display_name} Bạn đã lên level mới, và nhận {result['mick_awarded']} mick coin"
         image_path = level_card.get_level_up_image_path()
         if image_path:
-            await channel.send(text, file=discord.File(image_path, filename="levelup.png"))
+            await channel.send(
+                text, file=discord.File(image_path, filename="levelup.png"),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
         else:
-            await channel.send(text)
+            await channel.send(text, allowed_mentions=discord.AllowedMentions.none())
     except Exception:
         pass
 
@@ -539,6 +546,30 @@ async def _announce_level_up(member: discord.Member, result: dict, channel=None)
             await features.announce_unlocks(channel, member, unlocked)
     except Exception as e:
         log.warning("Kiểm tra thành tựu sau voice XP lỗi: %s", e)
+
+
+async def _announce_bot_update(old_version: float, bump_result: dict):
+    """Sau khi version bump lúc khởi động (xem on_ready), nhờ AI tóm tắt cập
+    nhật rồi đăng vào UPDATE_LOG_CHANNEL_ID. Chạy nền (fire-and-forget) để
+    không làm chậm on_ready nếu gọi Groq bị lag."""
+    channel = await _get_channel(UPDATE_LOG_CHANNEL_ID)
+    if channel is None:
+        log.warning("Không tìm thấy kênh log cập nhật (id=%s)", UPDATE_LOG_CHANNEL_ID)
+        return
+
+    summary = await ai_chat.summarize_bot_update(
+        old_version=old_version,
+        new_version=bump_result["version"],
+        changed_paths=bump_result.get("changed_paths", []),
+        removed_paths=bump_result.get("removed_paths", []),
+    )
+    embed = discord.Embed(
+        title=f"🔄 Bot vừa cập nhật · v{old_version:.2f} → v{bump_result['version']:.2f}",
+        description=summary,
+        color=discord.Color.blurple(),
+    )
+    embed.set_footer(text=f"{bump_result.get('changed_files', 0)} file thay đổi")
+    await channel.send(embed=embed)
 
 
 # ---------------------------------------------------------------------------
@@ -822,10 +853,15 @@ async def _apply_xp_gain(message: discord.Message):
 
     if result["levels_gained"] > 0:
         try:
-            await message.channel.send(
-                f"🎉 {message.author.mention} đã lên **Level {result['level']}**! "
-                f"Nhận **{result['mick_awarded']} MICK**."
-            )
+            text = f"{message.author.display_name} Bạn đã lên level mới, và nhận {result['mick_awarded']} mick coin"
+            image_path = level_card.get_level_up_image_path()
+            if image_path:
+                await message.channel.send(
+                    text, file=discord.File(image_path, filename="levelup.png"),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+            else:
+                await message.channel.send(text, allowed_mentions=discord.AllowedMentions.none())
         except Exception:
             pass
 
@@ -861,15 +897,22 @@ def _progress_bar(current: int, needed: int, length: int = 12) -> str:
     return "█" * filled + "░" * (length - filled)
 
 
-async def _build_rank_embed(target: discord.Member) -> discord.Embed:
-    profile = await economy.get_profile(target.id)
+async def _get_level_rank(user_id: int) -> tuple[int, int]:
+    """Trả (rank, total) - thứ hạng của user_id trên bảng xếp hạng toàn server
+    theo Level (dùng chung logic sort với /leaderboard và /rank)."""
     users = await db.get_all_users()
     users.sort(key=lambda u: (u[1].get("level", 0), u[1].get("xp", 0)), reverse=True)
-    position = next((i for i, (uid, _) in enumerate(users, start=1) if uid == str(target.id)), len(users) + 1)
+    position = next((i for i, (uid, _) in enumerate(users, start=1) if uid == str(user_id)), len(users) + 1)
+    return position, len(users)
+
+
+async def _build_rank_embed(target: discord.Member) -> discord.Embed:
+    profile = await economy.get_profile(target.id)
+    position, total = await _get_level_rank(target.id)
 
     bar = _progress_bar(profile["xp"], profile["xp_needed"])
     embed = discord.Embed(title=f"🏅 Rank của {target.display_name}", color=discord.Color.blurple())
-    embed.add_field(name="Hạng", value=f"#{position}/{len(users)}", inline=True)
+    embed.add_field(name="Hạng", value=f"#{position}/{total}", inline=True)
     embed.add_field(name="Level", value=str(profile["level"]), inline=True)
     embed.add_field(name="MICK", value=f"{MICKCOIN_EMOJI} {economy.format_mick(profile['mick'])}", inline=True)
     embed.add_field(name="Vé", value=f"{TICKET_EMOJI} {economy.format_ve(profile['ve'])}", inline=True)
@@ -958,12 +1001,14 @@ class ProfileView(discord.ui.View):
     async def btn_level(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         profile = await economy.get_profile(self.target.id)
+        rank, _total = await _get_level_rank(self.target.id)
         buf = await level_card.render_level_card(
             display_name=self.target.display_name,
             avatar_url=self.target.display_avatar.replace(size=256).url,
             level=profile["level"],
             xp=profile["xp"],
             xp_needed=profile["xp_needed"],
+            rank=rank,
         )
         file = discord.File(buf, filename="level.png")
         embed = discord.Embed(title=f"🖼️ Level card của {self.target.display_name}", color=discord.Color.blurple())
@@ -986,18 +1031,20 @@ async def profile_cmd(interaction: discord.Interaction, thanh_vien: discord.Memb
     await interaction.response.send_message(embed=embed, view=view)
 
 
-@tree.command(name="level", description="Xem level card Material You 3 của bạn (hoặc người khác)")
+@tree.command(name="level", description="Xem level (cấp độ) hiện tại của bạn hoặc người khác, kèm ảnh thẻ level")
 @discord.app_commands.describe(thanh_vien="Xem của người khác (bỏ trống để xem của bạn)")
 async def level_cmd(interaction: discord.Interaction, thanh_vien: discord.Member = None):
     target = thanh_vien or interaction.user
     await interaction.response.defer()
     profile = await economy.get_profile(target.id)
+    rank, _total = await _get_level_rank(target.id)
     buf = await level_card.render_level_card(
         display_name=target.display_name,
         avatar_url=target.display_avatar.replace(size=256).url,
         level=profile["level"],
         xp=profile["xp"],
         xp_needed=profile["xp_needed"],
+        rank=rank,
     )
     file = discord.File(buf, filename="level.png")
     embed = discord.Embed(color=discord.Color.blurple())
@@ -1192,6 +1239,121 @@ class RPSView(discord.ui.View):
             child.disabled = True
 
 
+class ChanLeView(discord.ui.View):
+    def __init__(self, game_id: str, owner_id: int):
+        super().__init__(timeout=60)
+        self.game_id = game_id
+        self.owner_id = owner_id
+        self.add_item(StopGameButton(game_id, owner_id))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Đây không phải ván của bạn!", ephemeral=True)
+            return False
+        return True
+
+    async def _play(self, interaction: discord.Interaction, choice: str):
+        embed = await features.process_chanle(self.game_id, choice)
+        if embed is None:
+            await interaction.response.send_message("❌ Ván này đã kết thúc hoặc không tồn tại!", ephemeral=True)
+            return
+        for child in self.children:
+            child.disabled = True
+        await _append_ticket_footer(embed, self.owner_id)
+        await interaction.response.edit_message(embed=embed, view=self)
+        await _finish_minigame(interaction, self.owner_id)
+        self.stop()
+
+    @discord.ui.button(label="Chẵn", emoji="🔵", style=discord.ButtonStyle.primary)
+    async def btn_chan(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._play(interaction, "chan")
+
+    @discord.ui.button(label="Lẻ", emoji="🟠", style=discord.ButtonStyle.secondary)
+    async def btn_le(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._play(interaction, "le")
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+
+class DoanMauView(discord.ui.View):
+    def __init__(self, game_id: str, owner_id: int):
+        super().__init__(timeout=60)
+        self.game_id = game_id
+        self.owner_id = owner_id
+        self.add_item(StopGameButton(game_id, owner_id))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Đây không phải ván của bạn!", ephemeral=True)
+            return False
+        return True
+
+    async def _play(self, interaction: discord.Interaction, choice: str):
+        embed = await features.process_doanmau(self.game_id, choice)
+        if embed is None:
+            await interaction.response.send_message("❌ Ván này đã kết thúc hoặc không tồn tại!", ephemeral=True)
+            return
+        for child in self.children:
+            child.disabled = True
+        await _append_ticket_footer(embed, self.owner_id)
+        await interaction.response.edit_message(embed=embed, view=self)
+        await _finish_minigame(interaction, self.owner_id)
+        self.stop()
+
+    @discord.ui.button(label="Đỏ", style=discord.ButtonStyle.danger)
+    async def btn_do(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._play(interaction, "do")
+
+    @discord.ui.button(label="Xanh", style=discord.ButtonStyle.primary)
+    async def btn_xanh(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._play(interaction, "xanh")
+
+    @discord.ui.button(label="Vàng", style=discord.ButtonStyle.secondary)
+    async def btn_vang(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._play(interaction, "vang")
+
+    @discord.ui.button(label="Tím", style=discord.ButtonStyle.secondary)
+    async def btn_tim(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._play(interaction, "tim")
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+
+class VongQuayView(discord.ui.View):
+    def __init__(self, game_id: str, owner_id: int):
+        super().__init__(timeout=60)
+        self.game_id = game_id
+        self.owner_id = owner_id
+        self.add_item(StopGameButton(game_id, owner_id))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Đây không phải ván của bạn!", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Quay", emoji="🎡", style=discord.ButtonStyle.success)
+    async def btn_spin(self, interaction: discord.Interaction, button: discord.ui.Button):
+        embed = await features.process_vongquay(self.game_id)
+        if embed is None:
+            await interaction.response.send_message("❌ Ván này đã kết thúc hoặc không tồn tại!", ephemeral=True)
+            return
+        for child in self.children:
+            child.disabled = True
+        await _append_ticket_footer(embed, self.owner_id)
+        await interaction.response.edit_message(embed=embed, view=self)
+        await _finish_minigame(interaction, self.owner_id)
+        self.stop()
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+
+
 class BetAmountModal(discord.ui.Modal, title="Nhập số MICK muốn cược"):
     def __init__(self, game_kind: str):
         super().__init__()
@@ -1364,7 +1526,7 @@ async def _require_ticket(interaction: discord.Interaction) -> bool:
     if not result["ok"]:
         await interaction.response.send_message(
             f"❌ Bạn hết Vé rồi! {TICKET_EMOJI} Vé hiện tại: {economy.format_ve(result['ve'])}. "
-            "Nhận thêm Vé qua `/diem-danh` (Daily) mỗi ngày.",
+            "Nhận thêm Vé qua `/daily` (Daily) mỗi ngày.",
             ephemeral=True,
         )
         return False
@@ -1440,18 +1602,44 @@ class GameChooserView(discord.ui.View):
     async def btn_xidach(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(BetAmountModal("xidach"))
 
+    @discord.ui.button(label="Chẵn Lẻ", emoji="🎲", style=discord.ButtonStyle.primary, row=2)
+    async def btn_chanle(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await _require_ticket(interaction):
+            return
+        gid, embed = features.start_chanle(self.owner_id)
+        await _append_ticket_footer(embed, self.owner_id)
+        await interaction.response.edit_message(embed=embed, view=ChanLeView(gid, self.owner_id))
+
+    @discord.ui.button(label="Đoán Màu", emoji="🎨", style=discord.ButtonStyle.primary, row=2)
+    async def btn_doanmau(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await _require_ticket(interaction):
+            return
+        gid, embed = features.start_doanmau(self.owner_id)
+        await _append_ticket_footer(embed, self.owner_id)
+        await interaction.response.edit_message(embed=embed, view=DoanMauView(gid, self.owner_id))
+
+    @discord.ui.button(label="Vòng Quay May Mắn", emoji="🎡", style=discord.ButtonStyle.success, row=2)
+    async def btn_vongquay(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await _require_ticket(interaction):
+            return
+        gid, embed = features.start_vongquay(self.owner_id)
+        await _append_ticket_footer(embed, self.owner_id)
+        await interaction.response.edit_message(embed=embed, view=VongQuayView(gid, self.owner_id))
+
 
 @tree.command(
     name="game",
-    description="Chơi minigame: Wordle, Đoán số, Kéo Búa Bao, Trivia, Tài Xỉu, Xì Dách",
+    description="Chơi minigame: Wordle, Đoán số, Kéo Búa Bao, Trivia, Tài Xỉu, Xì Dách, Chẵn Lẻ, Đoán Màu, Vòng Quay",
 )
 async def game_cmd(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🎮 Chọn minigame",
         description=(
-            "Bấm nút bên dưới để chơi. Mỗi ván có 1 ID riêng, tra lại bằng `/check-game`.\n\n"
+            "Bấm nút bên dưới để chơi. Mỗi ván có 1 ID riêng, tra lại bằng `/check-game`.\n"
+            "Mọi ván đều có nút 🛑 **Dừng ván** nếu muốn thoát giữa chừng.\n\n"
             "🎲 **Tài Xỉu** và 🃏 **Xì Dách** ăn thua MICK thật (cược tự do, miễn đủ số dư) — "
-            "các game còn lại chơi miễn phí, thắng nhận thưởng cố định."
+            "các game còn lại chơi miễn phí, thắng nhận thưởng cố định (riêng 🎡 **Vòng Quay May Mắn** "
+            "không bao giờ thua, chỉ random mức thưởng)."
         ),
         color=discord.Color.gold(),
     )
@@ -1475,6 +1663,94 @@ async def tra_game_cmd(interaction: discord.Interaction, id_van: str):
 # ---------------------------------------------------------------------------
 
 
+# Số dòng hiển thị mỗi trang leaderboard + nút "Xem thêm" bấm để lộ thêm
+# 1 trang nữa (không load lại toàn bộ danh sách, chỉ tăng số dòng hiển thị).
+_LEADERBOARD_PAGE_SIZE = 10
+_LEADERBOARD_MAX_ENTRIES = 50
+
+
+def _build_leaderboard_embed(interaction: discord.Interaction, users: list, sort_key: str, shown: int) -> discord.Embed:
+    top = users[:shown]
+    lines = []
+    for i, (uid, data) in enumerate(top, start=1):
+        member = interaction.guild.get_member(int(uid)) if interaction.guild else None
+        name = member.display_name if member else f"User {uid}"
+        is_owner_row = economy.is_owner(int(uid))
+        mick_display = economy.OWNER_DISPLAY_AMOUNT if is_owner_row else data.get("mick", 0)
+        medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"{i}.")
+        crown = " 👑" if is_owner_row else ""
+        if sort_key == "level":
+            lines.append(f"{medal} **{name}**{crown} — Level {data.get('level', 0)} ({MICKCOIN_EMOJI} {mick_display})")
+        else:
+            lines.append(f"{medal} **{name}**{crown} — {MICKCOIN_EMOJI} {mick_display} (Level {data.get('level', 0)})")
+
+    title = "🏆 Xếp hạng Level" if sort_key == "level" else "🏆 Xếp hạng MICK Coin"
+    embed = discord.Embed(title=title, description="\n".join(lines) or "Chưa có dữ liệu", color=discord.Color.orange())
+    if shown < len(users) and shown < _LEADERBOARD_MAX_ENTRIES:
+        embed.set_footer(text=f"Đang hiện {min(shown, len(users))}/{min(len(users), _LEADERBOARD_MAX_ENTRIES)} — bấm \"Xem thêm\" để xem tiếp")
+    return embed
+
+
+class LeaderboardView(discord.ui.View):
+    """Bảng xếp hạng có nút 'Xem thêm' (lộ thêm 1 trang) + select để xem
+    nhanh hồ sơ 1 người trong danh sách. Hồ sơ của owner bị khoá - chỉ chính
+    owner mới xem được qua đây, người khác bấm vào sẽ bị báo lỗi."""
+
+    def __init__(self, users: list, sort_key: str, owner_id: int):
+        super().__init__(timeout=120)
+        self.users = users[:_LEADERBOARD_MAX_ENTRIES]
+        self.sort_key = sort_key
+        self.owner_id = owner_id  # id người đã gõ lệnh /leaderboard (không phải chủ bot)
+        self.shown = min(_LEADERBOARD_PAGE_SIZE, len(self.users))
+        self._sync_more_button()
+        self._rebuild_select()
+
+    def _sync_more_button(self):
+        self.btn_more.disabled = self.shown >= len(self.users)
+
+    def _rebuild_select(self):
+        # Xoá select cũ (nếu có) rồi build lại theo đúng số dòng đang hiển thị
+        for item in list(self.children):
+            if isinstance(item, discord.ui.Select):
+                self.remove_item(item)
+        top = self.users[: self.shown]
+        if not top:
+            return
+        options = []
+        for i, (uid, data) in enumerate(top, start=1):
+            options.append(discord.SelectOption(label=f"#{i} · {data.get('_display_name', uid)}", value=uid))
+        select = discord.ui.Select(placeholder="🔍 Xem hồ sơ 1 người trong bảng...", options=options[:25])
+        select.callback = self._on_select
+        self.add_item(select)
+
+    async def _on_select(self, interaction: discord.Interaction):
+        select = [c for c in self.children if isinstance(c, discord.ui.Select)][0]
+        target_id = int(select.values[0])
+
+        if economy.is_owner(target_id) and interaction.user.id != target_id:
+            await interaction.response.send_message(
+                "Yoo bro, bro không có quyền truy cập hồ sơ của owner trừ owner 👑",
+                ephemeral=True,
+            )
+            return
+
+        member = interaction.guild.get_member(target_id) if interaction.guild else None
+        if member is None:
+            await interaction.response.send_message("Không tìm thấy thành viên này trong server.", ephemeral=True)
+            return
+
+        embed = await _build_profile_embed(member)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Xem thêm", emoji="➕", style=discord.ButtonStyle.secondary)
+    async def btn_more(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.shown = min(self.shown + _LEADERBOARD_PAGE_SIZE, len(self.users))
+        self._sync_more_button()
+        self._rebuild_select()
+        embed = _build_leaderboard_embed(interaction, self.users, self.sort_key, self.shown)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
 @tree.command(name="leaderboard", description="Bảng xếp hạng Level và MICK Coin")
 @discord.app_commands.describe(loai="Xếp theo Level hay MICK")
 @discord.app_commands.choices(loai=[
@@ -1490,21 +1766,17 @@ async def leaderboard_cmd(interaction: discord.Interaction, loai: discord.app_co
         users.sort(key=lambda u: (u[1].get("level", 0), u[1].get("xp", 0)), reverse=True)
     else:
         users.sort(key=lambda u: u[1].get("mick", 0), reverse=True)
+    users = users[:_LEADERBOARD_MAX_ENTRIES]
 
-    top = users[:10]
-    lines = []
-    for i, (uid, data) in enumerate(top, start=1):
+    # Gắn sẵn display_name vào data để select box dùng lại, đỡ phải gọi
+    # guild.get_member() lần nữa lúc build select.
+    for uid, data in users:
         member = interaction.guild.get_member(int(uid)) if interaction.guild else None
-        name = member.display_name if member else f"User {uid}"
-        medal = {1: "🥇", 2: "🥈", 3: "🥉"}.get(i, f"{i}.")
-        if sort_key == "level":
-            lines.append(f"{medal} **{name}** — Level {data.get('level', 0)} ({MICKCOIN_EMOJI} {data.get('mick', 0)})")
-        else:
-            lines.append(f"{medal} **{name}** — {MICKCOIN_EMOJI} {data.get('mick', 0)} (Level {data.get('level', 0)})")
+        data["_display_name"] = member.display_name if member else f"User {uid}"
 
-    title = "🏆 Xếp hạng Level" if sort_key == "level" else "🏆 Xếp hạng MICK Coin"
-    embed = discord.Embed(title=title, description="\n".join(lines) or "Chưa có dữ liệu", color=discord.Color.orange())
-    await interaction.followup.send(embed=embed)
+    view = LeaderboardView(users, sort_key, owner_id=interaction.user.id)
+    embed = _build_leaderboard_embed(interaction, users, sort_key, view.shown)
+    await interaction.followup.send(embed=embed, view=view)
 
 
 # ---------------------------------------------------------------------------
@@ -1533,7 +1805,7 @@ async def quest_cmd(interaction: discord.Interaction):
 
 
 @tree.command(
-    name="diem-danh",
+    name="daily",
     description="Nhận Daily ngay (dùng khi embed Daily bị trôi tin nhắn) - còn hạn từ 0h đến 12h trưa",
 )
 async def diem_danh_cmd(interaction: discord.Interaction):
@@ -1906,7 +2178,7 @@ _HELP_CATEGORIES = [
         "emoji": "📊",
         "commands": [
             ("/profile [thanh_vien]", "Hồ sơ · Level card ảnh · Rank · UUID · ngày tham gia — bấm nút để chuyển view"),
-            ("/level [thanh_vien]", "Xem riêng level card ảnh (Material You 3) của bạn hoặc người khác"),
+            ("/level [thanh_vien]", "Xem level (cấp độ) hiện tại của bạn hoặc người khác dưới dạng ảnh thẻ level"),
             ("/leaderboard [loai]", "Bảng xếp hạng theo Level hoặc theo MICK Coin"),
             ("/atm [hanh_dong] [so_tien]", "Gửi/rút MICK vào ATM, hoặc xem số dư"),
             ("/transfer-money [nguoi_nhan] [so_tien]", "Chuyển MICK cho người khác (cần xác minh mã OTP gửi qua DM)"),
@@ -1917,10 +2189,10 @@ _HELP_CATEGORIES = [
         "label": "Minigame & Quest",
         "emoji": "🎮",
         "commands": [
-            ("/game", "Chơi Wordle · Đoán số · Kéo Búa Bao · Trivia · 🎲 Tài Xỉu · 🃏 Xì Dách (2 game cuối cược MICK thật)"),
+            ("/game", "Chơi Wordle · Đoán số · Kéo Búa Bao · Trivia · Chẵn Lẻ · Đoán Màu · Vòng Quay May Mắn · 🎲 Tài Xỉu · 🃏 Xì Dách (2 game cuối cược MICK thật)"),
             ("/check-game [id_van]", "Tra thông tin/trạng thái 1 ván minigame theo ID riêng"),
             ("/quest", "Xem quest hằng ngày của bạn"),
-            ("/diem-danh", "Nhận Daily ngay (phòng khi embed Daily bị trôi tin nhắn) - còn hạn tới 12h trưa"),
+            ("/daily", "Nhận Daily ngay (phòng khi embed Daily bị trôi tin nhắn) - còn hạn tới 12h trưa"),
             ("/achievements", "Xem danh sách thành tựu"),
         ],
     },

@@ -46,6 +46,9 @@ from config import (
     GUESS_NUMBER_MAX,
     GUESS_NUMBER_MAX_TRIES,
     RPS_WIN_REWARD,
+    CHANLE_WIN_REWARD,
+    DOANMAU_WIN_REWARD,
+    VONGQUAY_REWARD_TIERS,
     GAME_LOOKUP_TTL_SEC,
     BUSINESS_INCOME_PER_TICK,
     BUSINESS_OPEN_COST,
@@ -383,7 +386,7 @@ def build_quest_embed(user: dict, display_name: str, invite_link: str | None = N
 # thì MICK càng ít (giảm DAILY_DECAY_RATE mỗi giờ), sàn DAILY_MIN_REWARD.
 # Hết hạn đúng DAILY_WINDOW_HOURS giờ (mặc định 12h trưa).
 #
-# Ngoài bấm nút trên embed, còn có thể gõ lệnh /diem-danh để nhận trực tiếp -
+# Ngoài bấm nút trên embed, còn có thể gõ lệnh /daily để nhận trực tiếp -
 # phòng trường hợp embed Daily bị trôi mất giữa dòng chat đông người.
 #
 # Random 1 phần trong DAILY_CHALLENGE_CHANCE lượt nhận sẽ hiện 1 câu hỏi phụ
@@ -423,7 +426,7 @@ def build_daily_embed() -> discord.Embed:
     embed = discord.Embed(
         title="🎁 Daily hàng ngày",
         description=(
-            f"Bấm nút bên dưới (hoặc gõ `/diem-danh` nếu tin nhắn này bị trôi) để nhận MICK miễn phí!\n"
+            f"Bấm nút bên dưới (hoặc gõ `/daily` nếu tin nhắn này bị trôi) để nhận MICK miễn phí!\n"
             f"Nhận ngay lúc 0h: **{DAILY_BASE_REWARD} MICK**. "
             f"Càng nhận trễ, MICK càng giảm {int(DAILY_DECAY_RATE * 100)}%/giờ "
             f"(tối thiểu **{DAILY_MIN_REWARD} MICK**).\n"
@@ -607,7 +610,7 @@ async def _grant_daily(interaction: discord.Interaction, today: str, challenge_b
 
 
 async def _handle_claim(interaction: discord.Interaction):
-    """Điểm vào chung cho cả nút 'Nhận Daily' trên embed VÀ lệnh /diem-danh -
+    """Điểm vào chung cho cả nút 'Nhận Daily' trên embed VÀ lệnh /daily -
     hành vi giống hệt nhau, chỉ khác nguồn gọi."""
     now = vn_now()
     today = now.strftime("%Y-%m-%d")
@@ -635,7 +638,7 @@ async def _handle_claim(interaction: discord.Interaction):
     await _grant_daily(interaction, today)
 
 
-# Alias công khai - dùng cho lệnh /diem-danh (xem discord_bot.py), tách biệt
+# Alias công khai - dùng cho lệnh /daily (xem discord_bot.py), tách biệt
 # tên khỏi hàm nội bộ _handle_claim để module khác không cần đụng tới hàm "_".
 claim_daily = _handle_claim
 
@@ -719,6 +722,9 @@ GAME_TYPE_LABELS = {
     "taixiu": "🎲 Tài Xỉu",
     "xidach": "🃏 Xì Dách",
     "trivia": "🧠 Trivia",
+    "chanle": "🎲 Chẵn Lẻ",
+    "doanmau": "🎨 Đoán Màu",
+    "vongquay": "🎡 Vòng Quay May Mắn",
 }
 
 _GAME_STATUS_LABELS = {
@@ -1036,6 +1042,134 @@ async def process_rps(game_id: str, player_choice: str) -> discord.Embed | None:
             f"Bạn chọn: {RPS_CHOICE_LABELS[player_choice]}\nBot chọn: {RPS_CHOICE_LABELS[bot_choice]}\n\n{result_text}"
         ),
         color=color,
+    )
+    return embed
+
+
+# --- Chẵn Lẻ (lắc 1 xúc xắc, đoán chẵn hay lẻ) -----------------------------
+
+
+def start_chanle(user_id: int) -> tuple[str, discord.Embed]:
+    gid = _new_game_id()
+    _active_games[gid] = {"type": "chanle", "owner_id": user_id, "status": "playing", "created_at": time.time()}
+    embed = discord.Embed(
+        title=f"🎲 Chẵn Lẻ · #{gid}",
+        description="Bot sẽ lắc 1 viên xúc xắc (1-6). Đoán xem kết quả là Chẵn hay Lẻ!",
+        color=discord.Color.gold(),
+    )
+    embed.set_footer(text=f"Đoán đúng nhận {CHANLE_WIN_REWARD} MICK")
+    return gid, embed
+
+
+async def process_chanle(game_id: str, choice: str) -> discord.Embed | None:
+    """choice: 'chan' hoặc 'le'."""
+    game = _active_games.get(game_id)
+    if not game or game["type"] != "chanle" or game["status"] != "playing":
+        return None
+
+    roll = random.randint(1, 6)
+    is_even = roll % 2 == 0
+    guessed_even = choice == "chan"
+    user_id = game["owner_id"]
+    won = is_even == guessed_even
+
+    if won:
+        new_balance = await economy.add_mick(user_id, CHANLE_WIN_REWARD)
+        result_text = f"🎉 Chính xác! 💰 Bạn đã nhận **{CHANLE_WIN_REWARD} Mick** (số dư: {new_balance})"
+        color, status = discord.Color.green(), "won"
+    else:
+        result_text, color, status = "😵 Đoán sai rồi! Chúc may mắn lần sau.", discord.Color.red(), "lost"
+
+    game["status"] = status
+    game["finished_at"] = time.time()
+    parity_text = "Chẵn" if is_even else "Lẻ"
+    game["summary"] = f"Xúc xắc ra **{roll}** ({parity_text}) · Bạn đoán **{'Chẵn' if guessed_even else 'Lẻ'}** → {result_text}"
+
+    embed = discord.Embed(
+        title=f"🎲 Chẵn Lẻ - Kết quả · #{game_id}",
+        description=f"Xúc xắc ra: **{roll}** ({parity_text})\nBạn đoán: **{'Chẵn' if guessed_even else 'Lẻ'}**\n\n{result_text}",
+        color=color,
+    )
+    return embed
+
+
+# --- Đoán Màu (chọn 1 trong 4 màu, khớp màu bot random thì thắng) ----------
+
+DOANMAU_LABELS = {"do": "🔴 Đỏ", "xanh": "🔵 Xanh", "vang": "🟡 Vàng", "tim": "🟣 Tím"}
+
+
+def start_doanmau(user_id: int) -> tuple[str, discord.Embed]:
+    gid = _new_game_id()
+    _active_games[gid] = {"type": "doanmau", "owner_id": user_id, "status": "playing", "created_at": time.time()}
+    embed = discord.Embed(
+        title=f"🎨 Đoán Màu · #{gid}",
+        description="Bot sẽ random 1 trong 4 màu. Chọn đúng màu để thắng!",
+        color=discord.Color.gold(),
+    )
+    embed.set_footer(text=f"Đoán đúng nhận {DOANMAU_WIN_REWARD} MICK (tỉ lệ 1/4)")
+    return gid, embed
+
+
+async def process_doanmau(game_id: str, choice: str) -> discord.Embed | None:
+    game = _active_games.get(game_id)
+    if not game or game["type"] != "doanmau" or game["status"] != "playing":
+        return None
+
+    bot_choice = random.choice(list(DOANMAU_LABELS.keys()))
+    user_id = game["owner_id"]
+    won = choice == bot_choice
+
+    if won:
+        new_balance = await economy.add_mick(user_id, DOANMAU_WIN_REWARD)
+        result_text = f"🎉 Trúng màu! 💰 Bạn đã nhận **{DOANMAU_WIN_REWARD} Mick** (số dư: {new_balance})"
+        color, status = discord.Color.green(), "won"
+    else:
+        result_text, color, status = "😵 Không trùng màu bot chọn. Chúc may mắn lần sau!", discord.Color.red(), "lost"
+
+    game["status"] = status
+    game["finished_at"] = time.time()
+    game["summary"] = f"Bạn: {DOANMAU_LABELS[choice]} · Bot: {DOANMAU_LABELS[bot_choice]} → {result_text}"
+
+    embed = discord.Embed(
+        title=f"🎨 Đoán Màu - Kết quả · #{game_id}",
+        description=f"Bạn chọn: {DOANMAU_LABELS[choice]}\nBot chọn: {DOANMAU_LABELS[bot_choice]}\n\n{result_text}",
+        color=color,
+    )
+    return embed
+
+
+# --- Vòng Quay May Mắn (không thua, chỉ random mức thưởng) ----------------
+
+
+def start_vongquay(user_id: int) -> tuple[str, discord.Embed]:
+    gid = _new_game_id()
+    _active_games[gid] = {"type": "vongquay", "owner_id": user_id, "status": "playing", "created_at": time.time()}
+    embed = discord.Embed(
+        title=f"🎡 Vòng Quay May Mắn · #{gid}",
+        description="Bấm \"Quay\" để nhận ngay 1 mức thưởng MICK ngẫu nhiên - không bao giờ thua!",
+        color=discord.Color.gold(),
+    )
+    embed.set_footer(text=f"Mức thưởng có thể ra: {', '.join(str(v) for v in VONGQUAY_REWARD_TIERS)} MICK")
+    return gid, embed
+
+
+async def process_vongquay(game_id: str) -> discord.Embed | None:
+    game = _active_games.get(game_id)
+    if not game or game["type"] != "vongquay" or game["status"] != "playing":
+        return None
+
+    reward = random.choice(VONGQUAY_REWARD_TIERS)
+    user_id = game["owner_id"]
+    new_balance = await economy.add_mick(user_id, reward)
+
+    game["status"] = "won"
+    game["finished_at"] = time.time()
+    game["summary"] = f"Vòng quay ra **{reward} MICK**"
+
+    embed = discord.Embed(
+        title=f"🎡 Vòng Quay May Mắn - Kết quả · #{game_id}",
+        description=f"🎉 Vòng quay dừng ở **{reward} MICK**! 💰 Số dư hiện tại: **{new_balance} MICK**.",
+        color=discord.Color.green(),
     )
     return embed
 
