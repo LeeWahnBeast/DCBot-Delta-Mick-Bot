@@ -13,10 +13,12 @@ Các file "lõi" (core) không gộp vào đây: config.py, db.py, economy.py,
 ai_chat.py, level_card.py, discord_bot.py, tiktok_client.py, web_server.py.
 """
 
+import asyncio
 import random
 import string
 import time
 import unicodedata
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 import discord
@@ -62,6 +64,9 @@ from config import (
     TICKET_EMOJI,
     TRIVIA_REWARD_MICK,
     TRIVIA_TIMEOUT_SEC,
+    MEMBER_MILESTONE_CODE_MAX_USES,
+    MEMBER_MILESTONE_CODE_TTL_SEC,
+    MEMBER_MILESTONE_CODE_REWARD_MICK,
 )
 
 # ===========================================================================
@@ -1517,6 +1522,79 @@ def verify_transfer_otp(user_id: int, entered_code: str) -> dict:
 
     _pending_transfers.pop(user_id, None)  # dùng 1 lần, xong xoá luôn
     return {"ok": True, "to_id": pending["to_id"], "amount": pending["amount"]}
+
+
+# ===========================================================================
+# Code quà mốc thành viên (member milestone)
+#
+# Khi server đạt mốc tròn chục/trăm member (xem on_member_join trong
+# discord_bot.py), bot tự tạo 1 code kiểu "ab12cd-MemberUp3456", giới hạn
+# MEMBER_MILESTONE_CODE_MAX_USES lượt nhập và tự hết hạn sau
+# MEMBER_MILESTONE_CODE_TTL_SEC giây. Ai nhập trước (qua lệnh /nhap-code)
+# và còn hạn/còn lượt thì được cộng thẳng MEMBER_MILESTONE_CODE_REWARD_MICK
+# MICK, mỗi người chỉ nhập được 1 lần/code.
+#
+# Lock riêng theo code (không dùng chung economy.user_lock vì đây là ghi
+# đè list "used_by" của DOCUMENT CODE, không phải ví của 1 user) để 2 người
+# bấm nhập cùng lúc không bị mất lượt do đọc-sửa-ghi chồng nhau.
+# ===========================================================================
+
+_milestone_code_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+
+def generate_milestone_code() -> str:
+    prefix = "".join(random.choices(string.ascii_lowercase + string.digits, k=6))
+    suffix = "".join(random.choices(string.digits, k=4))
+    return f"{prefix}-MemberUp{suffix}"
+
+
+async def create_milestone_code(guild_id: int, member_count: int) -> dict:
+    """Tạo + lưu 1 code quà mốc thành viên mới, trả về dict thông tin code
+    (kể cả khi lưu DB thất bại - caller vẫn có thể thông báo code, chỉ là
+    nó sẽ không redeem được nếu DB thật sự lỗi)."""
+    code = generate_milestone_code()
+    now = time.time()
+    data = {
+        "guild_id": guild_id,
+        "member_count": member_count,
+        "reward": MEMBER_MILESTONE_CODE_REWARD_MICK,
+        "max_uses": MEMBER_MILESTONE_CODE_MAX_USES,
+        "used_by": [],
+        "created_at": now,
+        "expires_at": now + MEMBER_MILESTONE_CODE_TTL_SEC,
+    }
+    await db.save_milestone_code(code, data)
+    return {"code": code, **data}
+
+
+async def redeem_milestone_code(user_id: int, code: str) -> dict:
+    """Trả {ok, reward, new_balance, remaining} hoặc
+    {ok: False, reason: not_found/expired/already_used/full}."""
+    code = code.strip()
+    async with _milestone_code_locks[code]:
+        doc = await db.get_milestone_code(code)
+        if not doc:
+            return {"ok": False, "reason": "not_found"}
+        if time.time() > doc.get("expires_at", 0):
+            return {"ok": False, "reason": "expired"}
+
+        used_by = list(doc.get("used_by") or [])
+        if user_id in used_by:
+            return {"ok": False, "reason": "already_used"}
+        if len(used_by) >= doc.get("max_uses", 0):
+            return {"ok": False, "reason": "full"}
+
+        used_by.append(user_id)
+        await db.save_milestone_code(code, {"used_by": used_by})
+        reward = doc.get("reward", 0)
+
+    new_balance = await economy.add_mick(user_id, reward)
+    return {
+        "ok": True,
+        "reward": reward,
+        "new_balance": new_balance,
+        "remaining": doc.get("max_uses", 0) - len(used_by),
+    }
 
 
 def cancel_transfer_otp(user_id: int) -> None:

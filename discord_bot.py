@@ -60,6 +60,9 @@ from config import (
     TICKET_EMOJI,
     GAME_TICKET_COST,
     QUEST_CHANNEL_ID,
+    BOOST_CHANNEL_ID,
+    MEMBER_MILESTONE_CHANNEL_ID,
+    MEMBER_MILESTONE_STEP,
     log,
 )
 from tiktok_client import TikTokClient
@@ -672,9 +675,42 @@ async def _get_or_create_invite_link(guild: discord.Guild, user: discord.abc.Use
     return f"https://discord.gg/{invite.code}"
 
 
+async def _maybe_announce_member_milestone(guild: discord.Guild) -> None:
+    """Nhắn kèm code quà khi tổng số member vừa chạm mốc tròn
+    MEMBER_MILESTONE_STEP (mặc định 50) - vd 50, 100, 150 member..."""
+    member_count = guild.member_count or 0
+    if member_count <= 0 or member_count % MEMBER_MILESTONE_STEP != 0:
+        return
+
+    channel = client.get_channel(MEMBER_MILESTONE_CHANNEL_ID)
+    if channel is None:
+        return
+
+    try:
+        info = await features.create_milestone_code(guild.id, member_count)
+    except Exception as e:
+        log.warning("Tạo code mốc thành viên lỗi: %s", e)
+        return
+
+    ttl_hours = int(info["expires_at"] - info["created_at"]) // 3600
+    try:
+        await channel.send(
+            f"Yoo, ae chúng ta có **{member_count}** member rồi và tôi sẽ tạo code "
+            f"`{info['code']}` cho các ae, giới hạn **{info['max_uses']}** người nhập nhé!😛\n"
+            f"Dùng lệnh `/nhap-code` để nhập. Hết hạn trong **{ttl_hours}H**."
+        )
+    except Exception:
+        pass
+
+
 @client.event
 async def on_member_join(member: discord.Member):
-    if member.bot or member.guild.id != DISCORD_GUILD_ID:
+    if member.guild.id != DISCORD_GUILD_ID:
+        return
+
+    _fire_and_forget(_maybe_announce_member_milestone(member.guild), "Thông báo mốc thành viên lỗi")
+
+    if member.bot:
         return
 
     old_uses = await _refresh_invite_cache(member.guild)
@@ -719,6 +755,26 @@ async def on_member_join(member: discord.Member):
         await channel.send(text)
     except Exception:
         pass
+
+
+@client.event
+async def on_member_update(before: discord.Member, after: discord.Member):
+    """Nhắn ở BOOST_CHANNEL_ID mỗi khi 1 member vừa BẮT ĐẦU boost server
+    (before.premium_since None -> after.premium_since có giá trị) - đây là
+    cách chính xác để bắt đúng người vừa boost, khác on_guild_update (chỉ
+    biết tổng số boost thay đổi, không biết ai)."""
+    if after.guild.id != DISCORD_GUILD_ID:
+        return
+    if before.premium_since is None and after.premium_since is not None:
+        channel = client.get_channel(BOOST_CHANNEL_ID)
+        if channel is None:
+            return
+        try:
+            await channel.send(
+                f"{after.mention} omg omg tôi thực sự đã vui mừng và có cảm xúc nhưng tôi là bot🤑🤑🤑"
+            )
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -1900,6 +1956,30 @@ class TransferOtpView(discord.ui.View):
         features.cancel_transfer_otp(self.sender_id)
         for child in self.children:
             child.disabled = True
+
+
+_MILESTONE_CODE_FAIL_REASONS = {
+    "not_found": "❌ Code không tồn tại hoặc đã sai!",
+    "expired": "⌛ Code này đã hết hạn rồi!",
+    "already_used": "⚠️ Bạn đã nhập code này rồi, không nhập lại được nữa!",
+    "full": "🚫 Code này đã hết lượt nhập rồi, nhanh tay lần sau nhé!",
+}
+
+
+@tree.command(name="code", description="Nhập code quà mốc thành viên server (giới hạn số lượt + thời gian)")
+@discord.app_commands.describe(code="Code nhận được ở kênh thông báo mốc thành viên")
+async def nhap_code_cmd(interaction: discord.Interaction, code: str):
+    result = await features.redeem_milestone_code(interaction.user.id, code)
+    if not result["ok"]:
+        msg = _MILESTONE_CODE_FAIL_REASONS.get(result["reason"], "Nhập code thất bại.")
+        await interaction.response.send_message(msg, ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        f"🎉 Nhập code thành công! Nhận **{result['reward']} MICK** (số dư: {result['new_balance']}). "
+        f"Code này còn **{result['remaining']}** lượt nhập.",
+        ephemeral=True,
+    )
 
 
 @tree.command(name="transfer-money", description="Chuyển MICK cho người khác (cần xác minh OTP qua DM, tiền càng cao xử lý càng lâu)")

@@ -130,6 +130,20 @@ AI_CHAT_CHANNEL_ID = int(os.environ.get("AI_CHAT_CHANNEL_ID", "15285904770735841
 # tóm tắt cập nhật ngắn rồi bot tự đăng vào đây.
 UPDATE_LOG_CHANNEL_ID = int(os.environ.get("UPDATE_LOG_CHANNEL_ID", "1539484617663324230"))
 
+# --- Thông báo Boost server: nhắn khi 1 member vừa bắt đầu boost (không
+# phải tổng số boost của server) - xem on_member_update trong discord_bot.py ---
+BOOST_CHANNEL_ID = int(os.environ.get("BOOST_CHANNEL_ID", "0") or 0) or 1531291586909044736
+
+# --- Thông báo mốc thành viên (tròn chục/trăm, vd 50/100/150...) kèm code
+# quà tặng giới hạn số lượt nhập + tự hết hạn - xem on_member_join trong
+# discord_bot.py và create_milestone_code()/redeem_milestone_code() trong
+# features.py ---
+MEMBER_MILESTONE_CHANNEL_ID = int(os.environ.get("MEMBER_MILESTONE_CHANNEL_ID", "0") or 0) or 1528556249178706071
+MEMBER_MILESTONE_STEP = int(os.environ.get("MEMBER_MILESTONE_STEP", "50"))  # mốc mỗi 50 member
+MEMBER_MILESTONE_CODE_MAX_USES = int(os.environ.get("MEMBER_MILESTONE_CODE_MAX_USES", "50"))
+MEMBER_MILESTONE_CODE_TTL_SEC = int(os.environ.get("MEMBER_MILESTONE_CODE_TTL_SEC", str(10 * 3600)))
+MEMBER_MILESTONE_CODE_REWARD_MICK = int(os.environ.get("MEMBER_MILESTONE_CODE_REWARD_MICK", "50"))
+
 # --- Chuyển MICK (transfer): tiền càng cao, thời gian xử lý càng lâu ---
 TRANSFER_SECONDS_PER_MICK = float(os.environ.get("TRANSFER_SECONDS_PER_MICK", "0.05"))  # 0.05s/1 MICK
 TRANSFER_MIN_SECONDS = float(os.environ.get("TRANSFER_MIN_SECONDS", "2"))

@@ -340,6 +340,24 @@ async def delete_invite_owner(code: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# milestone_codes: code quà tặng khi server đạt mốc thành viên tròn chục/
+# trăm (vd 50, 100, 150 member...), do on_member_join tạo (discord_bot.py) và
+# nhập qua lệnh /nhap-code (features.create_milestone_code /
+# redeem_milestone_code). Field: guild_id, member_count, reward, max_uses,
+# used_by (list user_id đã nhập), created_at, expires_at (epoch giây).
+# ---------------------------------------------------------------------------
+
+
+async def get_milestone_code(code: str) -> dict | None:
+    data = await _get_doc("milestone_codes", code)
+    return data or None
+
+
+async def save_milestone_code(code: str, data: dict) -> bool:
+    return await _set_doc("milestone_codes", code, data, merge=True)
+
+
+# ---------------------------------------------------------------------------
 # users: MICK, XP, level, Daily
 # ---------------------------------------------------------------------------
 
