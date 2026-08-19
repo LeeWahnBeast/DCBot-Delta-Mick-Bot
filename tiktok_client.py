@@ -24,12 +24,34 @@ vẫn nhẹ, chạy tốt trên Render free tier.
 """
 
 import asyncio
+import codecs
 
 import aiohttp
 import yt_dlp
 from TikTokLive import TikTokLiveClient
 
 from config import UA, log
+
+
+def _clean_avatar_url(url: str | None) -> str | None:
+    """TikTokLive đôi khi trả URL còn nguyên dạng JSON-escaped lấy từ
+    protobuf (vd. "https:\\/\\/p16-...") thay vì URL thật. Giải escape unicode
+    (\\uXXXX -> ký tự thật) rồi kiểm tra lại URL có hợp lệ (bắt đầu bằng
+    http:// hoặc https://) trước khi dùng, để không lưu/tải rác vào bot_state
+    hay ghép domain sai như "https:///...".
+    """
+    if not url:
+        return None
+    if "\\u" in url:
+        try:
+            url = codecs.decode(url, "unicode_escape")
+        except Exception:
+            pass
+    url = url.replace("\\/", "/")
+    if not url.startswith(("http://", "https://")):
+        log.warning("avatar_url không hợp lệ sau khi làm sạch, bỏ qua: %s", url[:120])
+        return None
+    return url
 
 _YDL_COMMON_OPTS = {
     "quiet": True,
@@ -101,7 +123,7 @@ async def _check_live_and_avatar(username: str) -> tuple[bool, str | None]:
     try:
         live_client = TikTokLiveClient(unique_id=f"@{username}")
         is_live = await live_client.is_live()
-        avatar_url = await live_client.get_avatar_url()
+        avatar_url = _clean_avatar_url(await live_client.get_avatar_url())
     except Exception as e:
         log.warning("TikTokLive check @%s lỗi: %s", username, e)
     finally:
