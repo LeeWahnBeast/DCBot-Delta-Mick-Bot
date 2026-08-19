@@ -445,7 +445,7 @@ MAIN_PAGE_TEMPLATE = """<!DOCTYPE html>
 
   <div class="panel intro-card">
     <h2>Giới thiệu</h2>
-    <p class="about-text">{bot_name} theo dõi và thông báo TikTok LIVE / video mới, kèm hệ thống kinh tế MICK, level, minigame và kinh doanh ảo ngay trong Discord server.</p>
+    <p class="about-text">{bot_name} theo dõi và thông báo TikTok LIVE, kèm hệ thống kinh tế MICK, level, minigame và kinh doanh ảo ngay trong Discord server.</p>
     <div class="creator-row">
       <div class="who"><span class="role">Người tạo bot</span><span class="name">{creator_name}</span></div>
       <a class="tiktok-link" href="{creator_tiktok_url}" target="_blank" rel="noopener">🎵 @{creator_tiktok}</a>

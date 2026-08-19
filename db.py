@@ -2,8 +2,7 @@
 Lớp lưu trữ duy nhất của bot: Firebase Realtime Database (RTDB), qua REST API.
 
 Gộp toàn bộ thao tác đọc/ghi dữ liệu bền vững ở đây:
-- bot_state    : last_video_id, was_live, last_identity_avatar_url (thay cho data.json cũ)
-- videos       : trạng thái "đã thông báo" (notified) của từng video TikTok
+- bot_state    : was_live, last_identity_avatar_url (thay cho data.json cũ)
 - users        : MICK, XP, level, ngày nhận Daily gần nhất, chuỗi Daily (streak/history)
 - daily        : mốc thời gian bắt đầu chu kỳ Daily hiện tại (để tính giảm dần theo giờ)
 - site         : lượt xem + rating (sao) của web dashboard
@@ -296,7 +295,13 @@ async def _atomic_update(path: str, fn, retries: int = 5):
 
 
 # ---------------------------------------------------------------------------
-# bot_state: thay thế data.json cũ (last_video_id, was_live, avatar...)
+# bot_state: thay thế data.json cũ (was_live, avatar...)
+#
+# (Tính năng theo dõi VIDEO đã bị XÓA cùng với việc bỏ yt-dlp - xem
+# tiktok_client.py và discord_bot.py. Node "videos" cũ và field
+# "last_video_id" trong bot_state không còn được ghi thêm nữa; dữ liệu cũ
+# (nếu có) vẫn còn nằm trong Firebase nhưng không ảnh hưởng gì, có thể tự xoá
+# tay trong Firebase Console nếu muốn dọn sạch.)
 # ---------------------------------------------------------------------------
 
 
@@ -306,60 +311,6 @@ async def get_bot_state() -> dict:
 
 async def save_bot_state(state: dict) -> bool:
     return await _set_doc("bot_state", "main", state, merge=True)
-
-
-# ---------------------------------------------------------------------------
-# videos: theo dõi video đã thông báo (notified) hay chưa, để retry nếu lỗi
-# ---------------------------------------------------------------------------
-
-
-async def get_video(video_id: str) -> dict:
-    return await _get_doc("videos", video_id)
-
-
-async def save_video(video_id: str, data: dict) -> bool:
-    return await _set_doc("videos", video_id, data, merge=True)
-
-
-async def get_unnotified_video_ids(limit: int = 5) -> list[str]:
-    """Trả về danh sách video_id chưa được đánh dấu notified=True (để bot gọi lại/ping lại).
-
-    LƯU Ý: cần thêm rule index cho nhanh (không bắt buộc, RTDB vẫn chạy đúng
-    nếu thiếu, chỉ chậm hơn khi node "videos" lớn):
-        {"rules": {"videos": {".indexOn": ["notified"]}}}
-    """
-    if _use_memory_fallback:
-        return [
-            key.split("/", 1)[1]
-            for key, val in _memory_store.items()
-            if key.startswith("videos/") and not val.get("notified")
-        ][:limit]
-    try:
-        params = {"orderBy": json.dumps("notified"), "equalTo": json.dumps(False), "limitToFirst": limit}
-        data, ok = await _rtdb_request("GET", "videos", params=params)
-        if not ok or not data:
-            return []
-        return list(data.keys())[:limit]
-    except Exception as e:
-        _warn_throttled("đọc videos chưa thông báo", str(e))
-        return []
-
-
-async def has_any_video() -> bool:
-    """Có ít nhất 1 video từng được ghi nhận trong DB chưa - dùng để phân
-    biệt CHÍNH XÁC 'bot mới deploy lần đầu tiên trong lịch sử' (nên bỏ qua
-    video đang có sẵn, không ping video cũ) với 'bot vừa restart và mất
-    bot_state tạm thời' (KHÔNG được bỏ qua, video mới vẫn phải thông báo).
-    Xem discord_bot.py: _handle_new_video()."""
-    if _use_memory_fallback:
-        return any(key.startswith("videos/") for key in _memory_store)
-    try:
-        params = {"limitToFirst": 1}
-        data, ok = await _rtdb_request("GET", "videos", params=params)
-        return bool(ok and data)
-    except Exception as e:
-        _warn_throttled("kiểm tra có video nào chưa", str(e))
-        return False
 
 
 # ---------------------------------------------------------------------------

@@ -3,7 +3,7 @@
 
 Các file liên quan:
 - config.py        : đọc biến môi trường, cấu hình chung
-- tiktok_client.py  : lấy dữ liệu (avatar, video mới, live) từ TikTok
+- tiktok_client.py  : lấy dữ liệu (avatar, live) từ TikTok
 - discord_bot.py    : Discord client + lưu trạng thái + vòng lặp kiểm tra + gửi thông báo
 - web_server.py     : dashboard web (lượt xem, đánh giá sao, CPU/RAM) + health-check
 - main.py (file này): ghép mọi thứ lại

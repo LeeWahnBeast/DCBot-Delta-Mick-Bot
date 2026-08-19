@@ -1,5 +1,5 @@
 """
-Discord Client: thông báo TikTok (video/live, có retry nếu gửi lỗi), đồng bộ
+Discord Client: thông báo TikTok live (có retry nếu gửi lỗi), đồng bộ
 avatar bot + icon/tên server mỗi 5 tiếng, hệ thống MICK + Level (XP theo tin
 nhắn VÀ theo voice chat), Daily hàng ngày (0h-12h trưa giờ VN, có chuỗi + câu hỏi phụ), 3 minigame có ID
 riêng và nhập liệu qua Modal (Wordle, Đoán số, Kéo Búa Bao), thành tựu, quest
@@ -7,9 +7,14 @@ hằng ngày, kinh doanh, ATM, chuyển MICK, AI chat. Tên lệnh slash đăng 
 tiếng Anh (yêu cầu kỹ thuật của Discord), mô tả/nội dung hiển thị bằng tiếng
 Việt - xem _HELP_CATEGORIES bên dưới, PHẢI khớp đúng tên lệnh thật khi sửa.
 
-Toàn bộ dữ liệu bền vững (video đã báo, level/MICK, mốc Daily...) lưu ở
-Firestore qua module db.py, không còn phụ thuộc file JSON local (ổ đĩa Render
-free là ephemeral, dễ mất dữ liệu khi redeploy).
+Toàn bộ dữ liệu bền vững (level/MICK, mốc Daily...) lưu ở Firestore qua
+module db.py, không còn phụ thuộc file JSON local (ổ đĩa Render free là
+ephemeral, dễ mất dữ liệu khi redeploy).
+
+(Tính năng báo VIDEO MỚI từ TikTok đã bị XÓA - yt-dlp liên tục lỗi "Unable to
+extract secondary user ID" do TikTok đổi cấu trúc API, và không có nguồn thay
+thế nào khả thi trên free tier (mọi API lấy list video khác đều cần chữ ký
+JS-VM hoặc dịch vụ trả phí). Chỉ còn giữ thông báo LIVE, vẫn dùng TikTokLive.)
 """
 
 import asyncio
@@ -186,7 +191,11 @@ async def _get_channel(channel_id: int = DISCORD_CHANNEL_ID):
 
 
 # ---------------------------------------------------------------------------
-# Vòng lặp 1: video mới (có retry nếu gửi lỗi) + trạng thái live
+# Vòng lặp 1: trạng thái live TikTok
+# (Tính năng báo video mới đã bị XÓA - yt-dlp liên tục lỗi "Unable to extract
+# secondary user ID" do TikTok đổi cấu trúc, và mọi API lấy list video khác
+# đều cần chữ ký JS-VM (X-Bogus/X-Gnarly) hoặc dịch vụ trả phí, không khả thi
+# trên free tier. Chỉ còn giữ lại phần LIVE - vẫn dùng TikTokLive, ổn định.)
 # ---------------------------------------------------------------------------
 
 
@@ -197,51 +206,7 @@ async def check_tiktok_loop():
         return
 
     channel = await _get_channel()
-    await _handle_new_video(profile, channel)
-    await _retry_unnotified_videos(channel)
     await _handle_live_status(profile, channel)
-
-
-def _video_embed(video_id: str, profile: dict | None, is_retry: bool, create_time: int | None = None) -> discord.Embed:
-    video_url = f"https://www.tiktok.com/@{TIKTOK_USERNAME}/video/{video_id}"
-    nickname = profile["nickname"] if profile else TIKTOK_USERNAME
-    title = f"🎬 {nickname} vừa đăng video TikTok mới!" if not is_retry else f"🎬 Video từ {nickname} (gửi lại)"
-
-    now_ts = int(time.time())
-    # create_time có thể tới từ profile (lần đầu phát hiện) hoặc được truyền
-    # sẵn (khi retry, lúc đó profile=None nên phải lấy từ DB - xem
-    # _retry_unnotified_videos bên dưới).
-    posted_ts = create_time if create_time is not None else (profile.get("latest_video_create_time") if profile else None)
-
-    embed = discord.Embed(
-        title=title,
-        url=video_url,
-        description=video_url,
-        color=discord.Color.from_rgb(254, 44, 85),
-        timestamp=datetime.now(timezone.utc),
-    )
-    if profile and profile.get("avatar_url"):
-        embed.set_thumbnail(url=profile["avatar_url"])
-
-    if posted_ts:
-        delay_sec = max(0, now_ts - posted_ts)
-        embed.add_field(
-            name="🕒 Đăng lúc",
-            value=f"<t:{posted_ts}:F> (<t:{posted_ts}:R>)",
-            inline=False,
-        )
-        embed.add_field(
-            name="📥 Bot phát hiện lúc",
-            value=f"<t:{now_ts}:F> (<t:{now_ts}:R>) · trễ ~{_format_delay(delay_sec)}",
-            inline=False,
-        )
-    else:
-        embed.add_field(
-            name="📥 Bot phát hiện lúc",
-            value=f"<t:{now_ts}:F> (<t:{now_ts}:R>)",
-            inline=False,
-        )
-    return embed
 
 
 def _format_delay(seconds: int) -> str:
@@ -257,75 +222,6 @@ def _format_delay(seconds: int) -> str:
     if not hours and (secs or not minutes):
         parts.append(f"{secs} giây")
     return " ".join(parts)
-
-
-async def _handle_new_video(profile: dict, channel):
-    latest_id = profile["latest_video_id"]
-    if not latest_id:
-        return
-
-    bot_state = await db.get_bot_state()
-    if latest_id == bot_state.get("last_video_id"):
-        return  # không có video mới
-
-    await db.save_bot_state({"last_video_id": latest_id})
-
-    existing = await db.get_video(latest_id)
-    if existing and existing.get("notified"):
-        return  # đã gửi thông báo cho video này rồi (vd. bot_state vừa mất do restart)
-
-    if not existing:
-        # "First run thật sự" = TOÀN BỘ DB chưa từng ghi nhận video nào (kể
-        # cả video khác) - chỉ trường hợp này mới bỏ qua thông báo, để tránh
-        # ping video cũ khi mới deploy bot lần đầu tiên trong lịch sử.
-        #
-        # QUAN TRỌNG: không được dùng bot_state.last_video_id để xác định
-        # "first run" (như code cũ) - giá trị đó có thể mất khi bot restart
-        # (Firebase lỗi tạm thời/dùng bộ nhớ RAM dự phòng), khiến 1 video
-        # MỚI THẬT bị hiểu nhầm thành "video cũ đã biết" và bị âm thầm đánh
-        # dấu notified=True mà KHÔNG hề gửi thông báo - đây là bug đã xảy ra.
-        is_true_first_run = not await db.has_any_video()
-        await db.save_video(
-            latest_id,
-            {
-                "notified": is_true_first_run,
-                "username": TIKTOK_USERNAME,
-                "create_time": profile.get("latest_video_create_time"),
-                "first_seen_at": int(time.time()),
-            },
-        )
-        if is_true_first_run:
-            return
-
-    if channel is None:
-        return  # notified vẫn False -> vòng lặp sau sẽ retry
-
-    try:
-        await channel.send(
-            content=f"{_mention_prefix()}📢 Có video mới từ @{TIKTOK_USERNAME}!",
-            embed=_video_embed(latest_id, profile, is_retry=False, create_time=profile.get("latest_video_create_time")),
-        )
-        await db.save_video(latest_id, {"notified": True})
-    except Exception as e:
-        log.warning("Gửi thông báo video lỗi (sẽ thử lại): %s", e)
-
-
-async def _retry_unnotified_videos(channel):
-    """Video nào chưa notified=True (do gửi lỗi/bot restart giữa chừng) thì gọi lại + ping lại."""
-    if channel is None:
-        return
-
-    for video_id in await db.get_unnotified_video_ids():
-        try:
-            video_doc = await db.get_video(video_id)
-            create_time = video_doc.get("create_time") if video_doc else None
-            await channel.send(
-                content=f"{_mention_prefix()}📢 Video từ @{TIKTOK_USERNAME} (gửi lại)!",
-                embed=_video_embed(video_id, None, is_retry=True, create_time=create_time),
-            )
-            await db.save_video(video_id, {"notified": True})
-        except Exception as e:
-            log.warning("Retry gửi video %s vẫn lỗi: %s", video_id, e)
 
 
 async def _handle_live_status(profile: dict, channel):
