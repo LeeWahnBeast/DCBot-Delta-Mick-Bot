@@ -61,6 +61,45 @@ _YDL_COMMON_OPTS = {
 }
 
 
+async def _fetch_sec_uid(username: str) -> str | None:
+    """Gọi thẳng API public TikTok để lấy sec_uid (không qua thư viện
+    TikTokLive - lib đó không expose sec_uid ra ngoài client trong bản đang
+    dùng, đã thử getattr(client, "user"/"web.user") và không có).
+
+    Đây là endpoint TikTokLive dùng nội bộ để check is_live() (thấy trong
+    log Render: GET .../api-live/user/room/?...&uniqueId=...) - gọi lại y
+    hệt, chỉ để đọc thêm field sec_uid có sẵn trong response.
+    """
+    url = "https://www.tiktok.com/api-live/user/room/"
+    params = {
+        "aid": "1988",
+        "app_language": "en",
+        "app_name": "tiktok_web",
+        "device_platform": "web_pc",
+        "webcast_language": "en",
+        "uniqueId": username,
+        "sourceType": "54",
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, headers={"User-Agent": UA}, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json(content_type=None)
+    except Exception as e:
+        log.warning("Lấy sec_uid @%s lỗi: %s", username, e)
+        return None
+
+    # sec_uid thường nằm ở data.user.secUid trong response của endpoint này.
+    user = ((data or {}).get("data") or {}).get("user") or {}
+    sec_uid = user.get("secUid") or user.get("sec_uid")
+    if not sec_uid:
+        # DEBUG TẠM: nếu thấy log này, gửi lại các key có trong "user" để
+        # xác định đúng tên field - xoá dòng log này sau khi xác nhận xong.
+        log.warning("Không tìm thấy secUid trong response, các key có trong user: %s", list(user.keys()))
+    return sec_uid or None
+
+
 def _extract_latest_video_sync(username: str, sec_uid: str | None = None) -> dict | None:
     """CHẠY ĐỒNG BỘ (blocking) - gọi trong executor thread riêng ở
     fetch_tiktok_profile() bên dưới, vì yt-dlp không phải thư viện async.
@@ -134,33 +173,22 @@ def _extract_latest_video_sync(username: str, sec_uid: str | None = None) -> dic
     }
 
 
-async def _check_live_and_avatar(username: str) -> tuple[bool, str | None, str | None]:
-    """Dùng TikTokLive để check đang live + lấy avatar + sec_uid - thư viện
-    async native, không cần tải HTML/regex tay. Trả về
-    (is_live, avatar_url, sec_uid).
+async def _check_live_and_avatar(username: str) -> tuple[bool, str | None]:
+    """Dùng TikTokLive để check đang live + lấy avatar - thư viện async
+    native, không cần tải HTML/regex tay. Trả về (is_live, avatar_url).
 
-    sec_uid lấy kèm ở đây (không tốn thêm request - client đã tự gọi
-    room-info API bên trong is_live()) để truyền cho yt-dlp dùng dạng
-    "tiktokuser:{sec_uid}", né lỗi "Unable to extract secondary user ID" mà
-    yt-dlp hay gặp khi tự đoán từ URL "@username" thường.
+    (sec_uid được lấy riêng qua _fetch_sec_uid() bằng aiohttp thẳng tới API
+    - đã thử lấy qua thuộc tính của TikTokLiveClient (client.user /
+    client.web.user) nhưng bản lib đang dùng không expose ra ngoài, nên
+    chuyển sang gọi thẳng.)
     """
     is_live = False
     avatar_url = None
-    sec_uid = None
     live_client = None
     try:
         live_client = TikTokLiveClient(unique_id=f"@{username}")
         is_live = await live_client.is_live()
         avatar_url = _clean_avatar_url(await live_client.get_avatar_url())
-        # Lấy sec_uid nếu lib có expose (tên field tùy version) - không có
-        # thì bỏ qua, yt-dlp sẽ fallback về URL thường như trước giờ.
-        user_obj = getattr(live_client, "user", None) or getattr(getattr(live_client, "web", None), "user", None)
-        sec_uid = getattr(user_obj, "sec_uid", None) if user_obj else None
-        if user_obj and not sec_uid:
-            # DEBUG TẠM: nếu thấy log này nghĩa là user_obj tồn tại nhưng
-            # field không tên "sec_uid" - xoá dòng log này sau khi xác định
-            # đúng tên field rồi sửa lại getattr ở trên.
-            log.warning("Không tìm thấy sec_uid trên user_obj, các field có: %s", [a for a in dir(user_obj) if not a.startswith("_")])
     except Exception as e:
         log.warning("TikTokLive check @%s lỗi: %s", username, e)
     finally:
@@ -173,7 +201,7 @@ async def _check_live_and_avatar(username: str) -> tuple[bool, str | None, str |
                 await close()
             except Exception:
                 pass
-    return is_live, avatar_url, sec_uid
+    return is_live, avatar_url
 
 
 async def fetch_tiktok_profile(session: aiohttp.ClientSession, username: str) -> dict | None:
@@ -195,7 +223,8 @@ async def fetch_tiktok_profile(session: aiohttp.ClientSession, username: str) ->
     session này nữa.
     """
     loop = asyncio.get_running_loop()
-    is_live, avatar_url, sec_uid = await _check_live_and_avatar(username)
+    is_live, avatar_url = await _check_live_and_avatar(username)
+    sec_uid = await _fetch_sec_uid(username)
     video_info = await loop.run_in_executor(None, _extract_latest_video_sync, username, sec_uid)
 
     if video_info is None and not is_live and avatar_url is None:
