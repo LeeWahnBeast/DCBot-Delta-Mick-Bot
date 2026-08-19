@@ -464,6 +464,80 @@ async def save_daily_state(data: dict) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# anniversary_state: nhớ tháng gần nhất đã đăng "Kỉ niệm N tháng" (tránh đăng
+# lại 2 lần trong cùng 1 tháng) - xem features.maybe_post_anniversary.
+# ---------------------------------------------------------------------------
+
+
+async def get_anniversary_state() -> dict:
+    return await _get_doc("bot_meta", "anniversary_state")
+
+
+async def save_anniversary_state(data: dict) -> bool:
+    return await _set_doc("bot_meta", "anniversary_state", data, merge=True)
+
+
+# ---------------------------------------------------------------------------
+# emoji_stats: tần suất dùng emoji (custom + unicode) trong chat + reaction,
+# dùng để tổng kết "top emoji" mỗi khi đăng kỉ niệm N tháng (xem
+# features.track_emojis_in_text / flush_emoji_counts / build_monthly_emoji_summary).
+# Cùng cơ chế batch-increment với bump_word_counts (đỡ tốn quota Firebase).
+# ---------------------------------------------------------------------------
+
+
+async def bump_emoji_counts(counts: dict[str, int]) -> None:
+    if not counts:
+        return
+
+    if _use_memory_fallback:
+        for emoji, delta in counts.items():
+            key = f"emoji_stats/{emoji}"
+            doc = _memory_store.setdefault(key, {})
+            doc["count"] = doc.get("count", 0) + delta
+        return
+
+    async def _bump_one(emoji: str, delta: int):
+        key = _safe_key(emoji)
+        try:
+            await _atomic_update(f"emoji_stats/{key}/count", lambda v: (v or 0) + delta)
+        except Exception as e:
+            _warn_throttled(f"cập nhật emoji '{emoji}'", str(e))
+
+    await asyncio.gather(*(_bump_one(e, d) for e, d in counts.items()))
+
+
+async def get_emoji_stats() -> dict[str, dict]:
+    """Trả {safe_key: {"count": n}} toàn bộ emoji đã ghi nhận từ lần reset gần nhất."""
+    if _use_memory_fallback:
+        out = {}
+        for key, val in _memory_store.items():
+            if key.startswith("emoji_stats/"):
+                out[key.split("/", 1)[1]] = dict(val)
+        return out
+    try:
+        data, ok = await _rtdb_request("GET", "emoji_stats")
+        return data or {} if ok else {}
+    except Exception as e:
+        _warn_throttled("đọc toàn bộ emoji_stats", str(e))
+        return {}
+
+
+async def reset_emoji_stats() -> bool:
+    """Xoá sạch bộ đếm emoji_stats - gọi sau mỗi lần đăng kỉ niệm tháng để
+    tháng tiếp theo đếm lại từ đầu."""
+    if _use_memory_fallback:
+        for key in [k for k in _memory_store if k.startswith("emoji_stats/")]:
+            del _memory_store[key]
+        return True
+    try:
+        _, ok = await _rtdb_request("DELETE", "emoji_stats")
+        return ok
+    except Exception as e:
+        _warn_throttled("xoá emoji_stats", str(e))
+        return False
+
+
+# ---------------------------------------------------------------------------
 # site: lượt xem + rating cho web dashboard
 # ---------------------------------------------------------------------------
 

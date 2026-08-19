@@ -146,7 +146,8 @@ async def on_ready():
     if not learn_word_flush_loop.is_running():
         learn_word_flush_loop.start()
         guess_meaning_loop.start()
-
+    if not anniversary_loop.is_running():
+        anniversary_loop.start()
     guild = client.get_guild(DISCORD_GUILD_ID)
     if guild is not None:
         await _refresh_invite_cache(guild)
@@ -481,9 +482,37 @@ async def learn_word_flush_loop():
     except Exception as e:
         log.warning("Flush từ học định kỳ lỗi: %s", e)
 
+    try:
+        await features.flush_emoji_counts()
+    except Exception as e:
+        log.warning("Flush emoji định kỳ lỗi: %s", e)
+
 
 @learn_word_flush_loop.before_loop
 async def before_learn_word_flush_loop():
+    await client.wait_until_ready()
+
+
+# ---------------------------------------------------------------------------
+# Kỉ niệm N tháng thành lập server - check 1 lần/giờ, thực chất chỉ đăng khi
+# đúng ngày "sinh nhật" server VÀ tháng này chưa đăng (xem
+# features.maybe_post_anniversary), nên check dày hơn daily_loop không sao.
+# ---------------------------------------------------------------------------
+
+
+@tasks.loop(hours=1)
+async def anniversary_loop():
+    guild = client.get_guild(DISCORD_GUILD_ID)
+    if guild is None:
+        return
+    try:
+        await features.maybe_post_anniversary(client, MEMBER_MILESTONE_CHANNEL_ID, guild)
+    except Exception as e:
+        log.warning("Check kỉ niệm tháng lỗi: %s", e)
+
+
+@anniversary_loop.before_loop
+async def before_anniversary_loop():
     await client.wait_until_ready()
 
 
@@ -777,6 +806,17 @@ async def on_member_join(member: discord.Member):
 
 
 @client.event
+async def on_reaction_add(reaction: discord.Reaction, user: discord.abc.User):
+    """Ghi nhận lượt reaction bằng emoji - phục vụ thống kê 'top emoji' khi
+    đăng kỉ niệm N tháng (xem features.maybe_post_anniversary)."""
+    if user.bot or reaction.message.guild is None or reaction.message.guild.id != DISCORD_GUILD_ID:
+        return
+    emoji = reaction.emoji
+    display = str(emoji) if isinstance(emoji, (discord.Emoji, discord.PartialEmoji)) else emoji
+    features.track_emoji_reaction(display)
+
+
+@client.event
 async def on_member_update(before: discord.Member, after: discord.Member):
     """Nhắn ở BOOST_CHANNEL_ID mỗi khi 1 member vừa BẮT ĐẦU boost server
     (before.premium_since None -> after.premium_since có giá trị) - đây là
@@ -833,6 +873,10 @@ async def on_message(message: discord.Message):
     # Chỉ học khi server đủ đông (xem AI_LEARN_MIN_MEMBERS trong config.py).
     member_count = message.guild.member_count or 0
     _fire_and_forget(ai_chat.learn_from_message(content, member_count), "Học từ lỗi")
+
+    # Đếm emoji (custom + unicode) dùng trong tin nhắn - phục vụ thống kê
+    # "top emoji" khi đăng kỉ niệm N tháng (xem features.maybe_post_anniversary).
+    features.track_emojis_in_text(content)
 
     # Thành tựu: tin nhắn đầu tiên
     asyncio.create_task(_check_first_message_achievement(message))

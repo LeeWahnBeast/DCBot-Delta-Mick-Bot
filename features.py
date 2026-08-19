@@ -15,6 +15,7 @@ ai_chat.py, level_card.py, discord_bot.py, tiktok_client.py, web_server.py.
 
 import asyncio
 import random
+import re
 import string
 import time
 import unicodedata
@@ -1595,6 +1596,122 @@ async def redeem_milestone_code(user_id: int, code: str) -> dict:
         "new_balance": new_balance,
         "remaining": doc.get("max_uses", 0) - len(used_by),
     }
+
+
+# ===========================================================================
+# Kỉ niệm N tháng thành lập server + thống kê emoji dùng nhiều nhất tháng
+#
+# - Mỗi tin nhắn/reaction có emoji được cộng dồn vào RAM (giống cơ chế "học
+#   từ" ở ai_chat.py), rồi 1 tasks.loop trong discord_bot.py flush theo batch
+#   lên Firebase (đỡ tốn quota so với ghi từng emoji 1 lần).
+# - Mỗi ngày, maybe_post_anniversary() kiểm tra: nếu hôm nay đúng "ngày sinh"
+#   của server (theo guild.created_at) và THÁNG NÀY chưa đăng, thì đăng
+#   "Kỉ niệm N tháng" kèm top emoji của tháng qua, rồi reset bộ đếm.
+# ===========================================================================
+
+_CUSTOM_EMOJI_RE = re.compile(r"<a?:\w+:\d+>")
+_UNICODE_EMOJI_CHAR_RE = re.compile(
+    "["
+    "\U0001F300-\U0001FAFF"
+    "\U00002600-\U000026FF"
+    "\U00002700-\U000027BF"
+    "\U0001F1E6-\U0001F1FF"
+    "\U00002B00-\U00002BFF"
+    "\U0001F900-\U0001F9FF"
+    "]"
+)
+
+_pending_emoji_counts: dict[str, int] = {}
+_PENDING_EMOJI_CAP = 1000  # chặn RAM phình nếu chat cực đông mà chưa kịp flush
+
+
+def track_emojis_in_text(content: str) -> None:
+    """Cộng dồn (RAM) số lần xuất hiện của mỗi emoji (custom + unicode) trong
+    1 đoạn text. Chỉ cộng RAM, xem flush_emoji_counts() để biết khi nào thật
+    sự ghi lên Firebase - gọi từ on_message trong discord_bot.py."""
+    if not content or len(_pending_emoji_counts) >= _PENDING_EMOJI_CAP:
+        return
+    found = _CUSTOM_EMOJI_RE.findall(content) + _UNICODE_EMOJI_CHAR_RE.findall(content)
+    for emoji in found:
+        _pending_emoji_counts[emoji] = _pending_emoji_counts.get(emoji, 0) + 1
+
+
+def track_emoji_reaction(emoji_display: str) -> None:
+    """Ghi nhận 1 lượt reaction bằng emoji - gọi từ on_reaction_add trong discord_bot.py."""
+    if not emoji_display or len(_pending_emoji_counts) >= _PENDING_EMOJI_CAP:
+        return
+    _pending_emoji_counts[emoji_display] = _pending_emoji_counts.get(emoji_display, 0) + 1
+
+
+async def flush_emoji_counts() -> None:
+    """Đẩy toàn bộ số đếm emoji đang chờ trong RAM lên Firebase theo batch.
+    Gọi định kỳ (vài phút/lần) từ 1 tasks.loop - KHÔNG gọi trực tiếp mỗi tin nhắn."""
+    if not _pending_emoji_counts:
+        return
+    counts = dict(_pending_emoji_counts)
+    _pending_emoji_counts.clear()
+    try:
+        await db.bump_emoji_counts(counts)
+    except Exception as e:
+        log.warning("Flush %d emoji lên Firebase lỗi (có thể mất lượt đếm đợt này): %s", len(counts), e)
+
+
+async def build_monthly_emoji_summary(top_n: int = 20) -> str:
+    """Trả text liệt kê top emoji được dùng nhiều nhất kể từ lần reset gần
+    nhất (dùng thẳng vào nội dung thông báo kỉ niệm tháng)."""
+    stats = await db.get_emoji_stats()
+    rows = [
+        (emoji, data.get("count", 0) if isinstance(data, dict) else 0)
+        for emoji, data in stats.items()
+    ]
+    rows = [r for r in rows if r[1] > 0]
+    if not rows:
+        return "_(chưa có emoji nào được ghi nhận trong tháng qua 🥲)_"
+
+    rows.sort(key=lambda r: r[1], reverse=True)
+    return "\n".join(f"{i}. {emoji} — **{count}** lượt" for i, (emoji, count) in enumerate(rows[:top_n], start=1))
+
+
+async def maybe_post_anniversary(client: discord.Client, channel_id: int, guild: discord.Guild) -> None:
+    """Gọi định kỳ (vd 1 lần/ngày) từ 1 tasks.loop. Nếu hôm nay đúng ngày
+    "sinh nhật" server (cùng ngày-trong-tháng với guild.created_at) và tháng
+    này CHƯA đăng, thì đăng thông báo kỉ niệm N tháng kèm top emoji dùng
+    nhiều nhất tháng qua vào channel_id, rồi reset bộ đếm emoji cho chu kỳ tiếp theo."""
+    now = vn_now()
+    created = guild.created_at
+    if now.day != created.day:
+        return
+
+    month_key = now.strftime("%Y-%m")
+    state = await db.get_anniversary_state()
+    if state.get("last_posted_month") == month_key:
+        return  # tháng này đăng rồi
+
+    months = (now.year - created.year) * 12 + (now.month - created.month)
+    if months <= 0:
+        return  # server chưa tròn tháng nào (vd mới lập trong tháng này)
+
+    channel = client.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await client.fetch_channel(channel_id)
+        except Exception:
+            return
+
+    await flush_emoji_counts()  # đẩy nốt phần đang chờ trong RAM trước khi tổng kết
+    summary = await build_monthly_emoji_summary()
+
+    try:
+        await channel.send(
+            f"🎉 Kỉ niệm {months} tháng thành lập server Delta Mick\n\n"
+            f"**Top emoji được dùng nhiều nhất trong tháng qua:**\n{summary}"
+        )
+    except Exception as e:
+        log.warning("Đăng kỉ niệm tháng lỗi: %s", e)
+        return
+
+    await db.save_anniversary_state({"last_posted_month": month_key})
+    await db.reset_emoji_stats()
 
 
 def cancel_transfer_otp(user_id: int) -> None:
