@@ -61,15 +61,21 @@ _YDL_COMMON_OPTS = {
 }
 
 
-def _extract_latest_video_sync(username: str) -> dict | None:
+def _extract_latest_video_sync(username: str, sec_uid: str | None = None) -> dict | None:
     """CHẠY ĐỒNG BỘ (blocking) - gọi trong executor thread riêng ở
     fetch_tiktok_profile() bên dưới, vì yt-dlp không phải thư viện async.
 
     Trả về {"video_id": str, "create_time": int|None, "nickname": str} của
     video mới nhất, hoặc None nếu không lấy được (lỗi mạng/user không tồn
     tại/TikTok chặn...).
+
+    Ưu tiên dùng sec_uid (lấy từ TikTokLive, xem _check_live_and_avatar) khi
+    có, vì TikTok gần đây hay trả lỗi "Unable to extract secondary user ID"
+    khi yt-dlp tự đoán từ URL "@username" thường - dùng thẳng
+    "tiktokuser:{sec_uid}" (đúng như yt-dlp khuyến nghị trong error message)
+    thì bỏ qua được luôn bước đoán đó.
     """
-    profile_url = f"https://www.tiktok.com/@{username}"
+    profile_url = f"tiktokuser:{sec_uid}" if sec_uid else f"https://www.tiktok.com/@{username}"
 
     # Bước 1: lấy DANH SÁCH video (extract_flat = nhanh, không tải chi tiết
     # từng video) - chỉ cần video đầu tiên (mới nhất, TikTok trả về theo thứ
@@ -79,8 +85,19 @@ def _extract_latest_video_sync(username: str) -> dict | None:
         with yt_dlp.YoutubeDL(flat_opts) as ydl:
             flat_info = ydl.extract_info(profile_url, download=False)
     except Exception as e:
-        log.warning("yt-dlp lấy danh sách video @%s lỗi: %s", username, e)
-        return None
+        # Nếu vừa thử bằng sec_uid mà vẫn lỗi, thử lại 1 lần với URL thường
+        # (fallback), phòng trường hợp sec_uid sai/hết hạn.
+        if sec_uid:
+            log.warning("yt-dlp lấy danh sách video (tiktokuser:%s) lỗi, thử lại bằng URL thường: %s", sec_uid, e)
+            try:
+                with yt_dlp.YoutubeDL(flat_opts) as ydl:
+                    flat_info = ydl.extract_info(f"https://www.tiktok.com/@{username}", download=False)
+            except Exception as e2:
+                log.warning("yt-dlp lấy danh sách video @%s lỗi (cả 2 cách): %s", username, e2)
+                return None
+        else:
+            log.warning("yt-dlp lấy danh sách video @%s lỗi: %s", username, e)
+            return None
 
     entries = (flat_info or {}).get("entries") or []
     if not entries:
@@ -88,9 +105,12 @@ def _extract_latest_video_sync(username: str) -> dict | None:
 
     latest = entries[0]
     video_id = latest.get("id")
-    video_url = latest.get("url") or f"{profile_url}/video/{video_id}"
     if not video_id:
         return None
+    # video_url dùng để lấy metadata bước 2 - luôn phải là URL thật
+    # (https://...), không phải "tiktokuser:sec_uid" của profile_url, kể cả
+    # khi entries[0]["url"] không có sẵn.
+    video_url = latest.get("url") or f"https://www.tiktok.com/@{username}/video/{video_id}"
 
     # Bước 2: lấy metadata ĐẦY ĐỦ (có timestamp đăng chính xác) nhưng CHỈ
     # cho đúng 1 video mới nhất này - không extract_flat=False cho cả danh
@@ -114,16 +134,33 @@ def _extract_latest_video_sync(username: str) -> dict | None:
     }
 
 
-async def _check_live_and_avatar(username: str) -> tuple[bool, str | None]:
-    """Dùng TikTokLive để check đang live + lấy avatar - thư viện async
-    native, không cần tải HTML/regex tay. Trả về (is_live, avatar_url)."""
+async def _check_live_and_avatar(username: str) -> tuple[bool, str | None, str | None]:
+    """Dùng TikTokLive để check đang live + lấy avatar + sec_uid - thư viện
+    async native, không cần tải HTML/regex tay. Trả về
+    (is_live, avatar_url, sec_uid).
+
+    sec_uid lấy kèm ở đây (không tốn thêm request - client đã tự gọi
+    room-info API bên trong is_live()) để truyền cho yt-dlp dùng dạng
+    "tiktokuser:{sec_uid}", né lỗi "Unable to extract secondary user ID" mà
+    yt-dlp hay gặp khi tự đoán từ URL "@username" thường.
+    """
     is_live = False
     avatar_url = None
+    sec_uid = None
     live_client = None
     try:
         live_client = TikTokLiveClient(unique_id=f"@{username}")
         is_live = await live_client.is_live()
         avatar_url = _clean_avatar_url(await live_client.get_avatar_url())
+        # Lấy sec_uid nếu lib có expose (tên field tùy version) - không có
+        # thì bỏ qua, yt-dlp sẽ fallback về URL thường như trước giờ.
+        user_obj = getattr(live_client, "user", None) or getattr(getattr(live_client, "web", None), "user", None)
+        sec_uid = getattr(user_obj, "sec_uid", None) if user_obj else None
+        if user_obj and not sec_uid:
+            # DEBUG TẠM: nếu thấy log này nghĩa là user_obj tồn tại nhưng
+            # field không tên "sec_uid" - xoá dòng log này sau khi xác định
+            # đúng tên field rồi sửa lại getattr ở trên.
+            log.warning("Không tìm thấy sec_uid trên user_obj, các field có: %s", [a for a in dir(user_obj) if not a.startswith("_")])
     except Exception as e:
         log.warning("TikTokLive check @%s lỗi: %s", username, e)
     finally:
@@ -136,7 +173,7 @@ async def _check_live_and_avatar(username: str) -> tuple[bool, str | None]:
                 await close()
             except Exception:
                 pass
-    return is_live, avatar_url
+    return is_live, avatar_url, sec_uid
 
 
 async def fetch_tiktok_profile(session: aiohttp.ClientSession, username: str) -> dict | None:
@@ -158,8 +195,8 @@ async def fetch_tiktok_profile(session: aiohttp.ClientSession, username: str) ->
     session này nữa.
     """
     loop = asyncio.get_running_loop()
-    video_info = await loop.run_in_executor(None, _extract_latest_video_sync, username)
-    is_live, avatar_url = await _check_live_and_avatar(username)
+    is_live, avatar_url, sec_uid = await _check_live_and_avatar(username)
+    video_info = await loop.run_in_executor(None, _extract_latest_video_sync, username, sec_uid)
 
     if video_info is None and not is_live and avatar_url is None:
         log.warning("Không lấy được dữ liệu TikTok @%s (cả yt-dlp lẫn TikTokLive đều lỗi).", username)
