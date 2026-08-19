@@ -4,3 +4,5 @@ google-auth>=2.29.0
 requests>=2.31.0
 psutil>=5.9.0
 Pillow>=10.0.0
+yt-dlp>=2025.11.0
+TikTokLive>=6.0.0
