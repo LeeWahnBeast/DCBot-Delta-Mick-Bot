@@ -19,6 +19,17 @@ import time
 import db
 from config import log
 
+# RTDB cấm các ký tự này trong KEY: . # $ [ ] /  - đường dẫn file (vd.
+# "discord_bot.py", "assets/fonts/DejaVuSans.ttf") chứa cả dấu chấm lẫn dấu
+# gạch chéo, nên phải escape trước khi dùng làm key trong version_file_hashes,
+# nếu không Firebase từ chối NGUYÊN object với lỗi 400 (đây là nguyên nhân
+# bot_state/main bị lỗi 400 ngay lúc mới boot).
+_KEY_ESCAPE = str.maketrans({".": ",", "/": "|", "#": "_", "$": "_", "[": "(", "]": ")"})
+
+
+def _escape_path_key(path: str) -> str:
+    return path.translate(_KEY_ESCAPE)
+
 # Chỉ tính diff trên file .py (mã nguồn thật sự) - bỏ qua asset (font, ảnh),
 # cache, venv... vì đổi mấy thứ đó không phải "cập nhật tính năng/code".
 _TRACKED_EXTENSIONS = (".py",)
@@ -70,9 +81,13 @@ async def check_and_bump_version(root: str = ".") -> dict:
     old_hashes = state.get("version_file_hashes") or {}
 
     new_hashes = _scan_source_hashes(root)
+    # old_hashes đọc từ Firebase đã ở dạng key escaped (vd. "discord_bot,py")
+    # từ lần lưu trước -> so sánh phải escape new_hashes theo cùng kiểu.
+    new_hashes_escaped = {_escape_path_key(p): h for p, h in new_hashes.items()}
 
-    changed = [p for p, h in new_hashes.items() if old_hashes.get(p) != h]
-    removed = [p for p in old_hashes if p not in new_hashes]
+    changed = [p for p, h in new_hashes.items() if old_hashes.get(_escape_path_key(p)) != h]
+    old_paths_unescaped = set(old_hashes.keys())  # đã escaped từ trước, so trực tiếp theo key escaped
+    removed = [p for p in old_paths_unescaped if p not in new_hashes_escaped]
     changed_count = len(changed) + len(removed)
 
     if not old_hashes:
@@ -80,7 +95,7 @@ async def check_and_bump_version(root: str = ".") -> dict:
         # sánh) -> chỉ lưu mốc ban đầu, không bump để tránh nhảy version ảo.
         await db.save_bot_state({
             "version": old_version,
-            "version_file_hashes": new_hashes,
+            "version_file_hashes": new_hashes_escaped,
             "version_updated_at": int(time.time()),
         })
         return {"version": old_version, "bumped": False, "changed_files": 0}
@@ -93,7 +108,7 @@ async def check_and_bump_version(root: str = ".") -> dict:
 
     await db.save_bot_state({
         "version": new_version,
-        "version_file_hashes": new_hashes,
+        "version_file_hashes": new_hashes_escaped,
         "version_updated_at": int(time.time()),
         "version_last_changed_files": changed_count,
     })
