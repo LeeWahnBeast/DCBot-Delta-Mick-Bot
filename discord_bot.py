@@ -522,6 +522,35 @@ def _fire_and_forget(coro, err_label: str):
     return asyncio.create_task(_runner())
 
 
+async def _send_level_up_notice(channel, member: discord.Member, result: dict):
+    """Gửi thông báo lên level: text có mention thật + rank hiện tại, kèm
+    ẢNH LEVEL CARD RENDER ĐỘNG (level_card.render_level_card - đúng level/
+    rank/XP thật của người vừa lên), KHÔNG dùng ảnh tĩnh assets/levelup.png
+    nữa vì ảnh tĩnh không phản ánh đúng level/rank thật (xem yêu cầu An)."""
+    try:
+        rank, _total = await _get_level_rank(member.id)
+        xp_needed = economy.xp_needed_for_level(result["level"])
+        buf = await level_card.render_level_card(
+            display_name=member.display_name,
+            avatar_url=member.display_avatar.replace(size=256).url,
+            level=result["level"],
+            xp=result["xp"],
+            xp_needed=xp_needed,
+            rank=rank,
+        )
+        text = (
+            f"{member.mention} Bạn vừa lên level {result['level']}, "
+            f"hiện bạn đang ở rank {rank}, cố gắng bạn nhé"
+        )
+        await channel.send(
+            text,
+            file=discord.File(buf, filename="levelup.png"),
+            allowed_mentions=discord.AllowedMentions(users=[member]),
+        )
+    except Exception as e:
+        log.warning("Gửi thông báo lên level lỗi: %s", e)
+
+
 async def _announce_level_up(member: discord.Member, result: dict, channel=None):
     """Thông báo lên level (dùng chung cho XP nhắn tin lẫn XP voice chat).
     channel=None -> tự lấy kênh chat chính (AI_CHAT_CHANNEL_ID), KHÔNG dùng
@@ -530,18 +559,8 @@ async def _announce_level_up(member: discord.Member, result: dict, channel=None)
         channel = await _get_channel(AI_CHAT_CHANNEL_ID)
     if channel is None:
         return
-    try:
-        text = f"{member.display_name} Bạn đã lên level mới, và nhận {result['mick_awarded']} mick coin"
-        image_path = level_card.get_level_up_image_path()
-        if image_path:
-            await channel.send(
-                text, file=discord.File(image_path, filename="levelup.png"),
-                allowed_mentions=discord.AllowedMentions.none(),
-            )
-        else:
-            await channel.send(text, allowed_mentions=discord.AllowedMentions.none())
-    except Exception:
-        pass
+
+    await _send_level_up_notice(channel, member, result)
 
     try:
         unlocked = await features.check_and_unlock_by_stats(member.id)
@@ -908,18 +927,7 @@ async def _apply_xp_gain(message: discord.Message):
         return
 
     if result["levels_gained"] > 0:
-        try:
-            text = f"{message.author.display_name} Bạn đã lên level mới, và nhận {result['mick_awarded']} mick coin"
-            image_path = level_card.get_level_up_image_path()
-            if image_path:
-                await message.channel.send(
-                    text, file=discord.File(image_path, filename="levelup.png"),
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-            else:
-                await message.channel.send(text, allowed_mentions=discord.AllowedMentions.none())
-        except Exception:
-            pass
+        await _send_level_up_notice(message.channel, message.author, result)
 
         await _bump_quest_and_notify(message, "level_up")
 
