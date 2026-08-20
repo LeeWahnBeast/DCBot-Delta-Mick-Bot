@@ -132,11 +132,11 @@ def _sanitize_ai_output(text: str) -> str:
     return text
 
 
-async def _groq_chat(messages: list[dict]) -> str | None:
+async def _groq_chat(messages: list[dict], max_tokens: int = 300) -> str | None:
     if not GROQ_API_KEY:
         return None
     headers = {"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"}
-    payload = {"model": GROQ_MODEL, "messages": messages, "temperature": 0.9, "max_tokens": 300}
+    payload = {"model": GROQ_MODEL, "messages": messages, "temperature": 0.9, "max_tokens": max_tokens}
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(GROQ_URL, headers=headers, json=payload, timeout=30) as resp:
@@ -179,7 +179,8 @@ async def search_answer(system_prompt: str, user_text: str) -> tuple[str | None,
     if not GEMINI_API_KEY:
         log.warning("search_answer: thiếu GEMINI_API_KEY")
         return None, False
-    url = f"{GEMINI_URL.format(model=GEMINI_MODEL)}?key={GEMINI_API_KEY}"
+    url = GEMINI_URL.format(model=GEMINI_MODEL)
+    headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
     payload = {
         "system_instruction": {"parts": [{"text": system_prompt}]},
         "contents": [{"role": "user", "parts": [{"text": user_text}]}],
@@ -188,7 +189,7 @@ async def search_answer(system_prompt: str, user_text: str) -> tuple[str | None,
     }
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.post(url, json=payload, timeout=45) as resp:
+            async with session.post(url, headers=headers, json=payload, timeout=45) as resp:
                 if resp.status == 429:
                     log.warning("search_answer: Gemini hết quota (429)")
                     return None, False
@@ -291,7 +292,7 @@ async def generate_auto_message() -> str | None:
 # ---------------------------------------------------------------------------
 
 
-_DIFF_BLOCK_MAX_CHARS = 6000  # chặn prompt phình quá to nếu đổi nhiều file/nhiều dòng
+_DIFF_BLOCK_MAX_CHARS = 24000  # tổng ngân sách cho toàn bộ diff gửi cho AI
 
 
 async def summarize_bot_update(
@@ -305,12 +306,18 @@ async def summarize_bot_update(
     thuần, để nơi gọi (xem discord_bot._announce_bot_update) biết mà báo rõ
     cho admin thay vì âm thầm đăng 1 changelog trống-ý-nghĩa."""
     if diffs:
+        # Chia đều ngân sách ký tự cho TỪNG file thay đổi (thay vì cắt theo
+        # thứ tự chèn của dict như trước) - tránh tình trạng đổi nhiều file
+        # cùng lúc thì mấy file đứng SAU bị cắt mất hoàn toàn, khiến AI chỉ
+        # thấy 1-2 file đầu và bỏ sót tính năng/lệnh mới nằm ở file khác.
+        per_file_cap = max(_DIFF_BLOCK_MAX_CHARS // max(len(diffs), 1), 800)
         parts = []
         for path, diff_text in diffs.items():
-            parts.append(f"--- {path} ---\n{diff_text}")
+            snippet = diff_text
+            if len(snippet) > per_file_cap:
+                snippet = snippet[:per_file_cap] + "\n... (cắt bớt, file này còn nhiều thay đổi khác)"
+            parts.append(f"--- {path} ---\n{snippet}")
         diff_block = "\n\n".join(parts)
-        if len(diff_block) > _DIFF_BLOCK_MAX_CHARS:
-            diff_block = diff_block[:_DIFF_BLOCK_MAX_CHARS] + "\n... (cắt bớt, còn nhiều thay đổi khác)"
     else:
         diff_block = "(không có)"
     removed_list = "\n".join(f"- {p}" for p in removed_paths) or "(không có)"
@@ -345,7 +352,7 @@ async def summarize_bot_update(
             ),
         },
     ]
-    result = await _groq_chat(messages)
+    result = await _groq_chat(messages, max_tokens=700)
     if result:
         return _sanitize_ai_output(result), True
 
