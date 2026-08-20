@@ -170,15 +170,13 @@ def needs_web_search(text: str) -> bool:
     return bool(_SEARCH_TRIGGER_RE.search(text or ""))
 
 
-async def search_answer(system_prompt: str, user_text: str) -> tuple[str | None, bool]:
+async def search_answer(system_prompt: str, user_text: str) -> tuple[str | None, bool, str]:
     """Gọi Gemini với tool "google_search" tích hợp sẵn (Gemini tự quyết
-    định có cần search hay không tuỳ câu hỏi). Trả về (nội dung, ok) -
-    ok=False khi thiếu GEMINI_API_KEY, hết quota (429), hoặc lỗi gọi API -
-    nơi gọi (xem _reply_with_search) sẽ báo lỗi rõ cho user thay vì âm thầm
-    im lặng khi ok=False."""
+    định có cần search hay không tuỳ câu hỏi). Trả về (nội dung, ok, lý_do) -
+    lý_do là mã lỗi ngắn gọn (vd "http_403: ...") để hiện luôn cho admin
+    thấy trong Discord, khỏi phải mò log Render mỗi lần lỗi."""
     if not GEMINI_API_KEY:
-        log.warning("search_answer: thiếu GEMINI_API_KEY")
-        return None, False
+        return None, False, "thiếu GEMINI_API_KEY"
     url = GEMINI_URL.format(model=GEMINI_MODEL)
     headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
     payload = {
@@ -190,24 +188,33 @@ async def search_answer(system_prompt: str, user_text: str) -> tuple[str | None,
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(url, headers=headers, json=payload, timeout=45) as resp:
-                if resp.status == 429:
-                    log.warning("search_answer: Gemini hết quota (429)")
-                    return None, False
                 if resp.status != 200:
                     body = await resp.text()
-                    log.warning("Gemini API lỗi %s: %s", resp.status, body[:300])
-                    return None, False
+                    log.warning("Gemini API lỗi %s: %s", resp.status, body[:500])
+                    # Rút gọn message lỗi của Google (thường có field error.message)
+                    # để nhét vừa vào 1 dòng Discord thay vì cả cục JSON dài.
+                    short = body[:200]
+                    try:
+                        err_json = json.loads(body)
+                        short = err_json.get("error", {}).get("message", short)[:200]
+                    except Exception:
+                        pass
+                    return None, False, f"http_{resp.status}: {short}"
                 data = await resp.json()
                 candidates = data.get("candidates") or []
                 if not candidates:
-                    log.warning("Gemini API không trả candidate nào (có thể bị chặn safety filter)")
-                    return None, False
+                    block_reason = (data.get("promptFeedback") or {}).get("blockReason")
+                    log.warning("Gemini API không trả candidate nào (block_reason=%s)", block_reason)
+                    return None, False, f"bị chặn nội dung (blockReason={block_reason})" if block_reason else "không có candidate trả về"
                 parts = candidates[0].get("content", {}).get("parts", [])
                 text = "".join(p.get("text", "") for p in parts).strip()
-                return (text or None), bool(text)
+                if not text:
+                    finish_reason = candidates[0].get("finishReason")
+                    return None, False, f"nội dung rỗng (finishReason={finish_reason})"
+                return text, True, ""
     except Exception as e:
         log.warning("Gọi Gemini lỗi: %s", e)
-        return None, False
+        return None, False, f"lỗi mạng/timeout: {e}"
 
 
 async def reply_to_message(message: discord.Message) -> str | None:
@@ -235,13 +242,18 @@ async def _reply_with_search(message: discord.Message, system_prompt: str, user_
     except Exception as e:
         log.warning("Gửi thông báo đang tìm kiếm lỗi: %s", e)
 
-    result, ok = await search_answer(system_prompt, user_text)
+    result, ok, reason = await search_answer(system_prompt, user_text)
     if ok and result:
         final_text = _sanitize_ai_output(result)
         if len(final_text) > 2000:
             final_text = final_text[:1990] + "…"
     else:
-        final_text = "-# ⚠️ tìm kiếm lỗi\nSorry, hiện mình tìm kiếm không được (hết quota hoặc lỗi Gemini), thử hỏi lại sau nha 🙏"
+        log.warning("_reply_with_search: search_answer thất bại (%s)", reason)
+        final_text = (
+            "-# ⚠️ tìm kiếm lỗi\n"
+            f"Sorry, hiện mình tìm kiếm không được, thử hỏi lại sau nha 🙏\n"
+            f"-# lý do: {reason}"
+        )
 
     if status_msg is not None:
         try:
@@ -261,7 +273,7 @@ async def generate_auto_message() -> str | None:
     tin" thay vì chỉ bịa chuyện phiếm; nếu Gemini lỗi/hết quota thì ÂM THẦM
     rớt về câu bịa bình thường (auto-chat không cần báo lỗi cho ai thấy)."""
     if random.random() < 0.35:
-        result, ok = await search_answer(
+        result, ok, reason = await search_answer(
             SYSTEM_PROMPT,
             "Tìm 1 tin tức/sự kiện đang hot, thú vị, không nhạy cảm (không chính trị "
             "gây tranh cãi, không bạo lực, không tin giả) hôm nay, rồi viết 1 câu ngắn "
@@ -270,6 +282,7 @@ async def generate_auto_message() -> str | None:
         )
         if ok and result:
             return _sanitize_ai_output(result)
+        log.warning("generate_auto_message: search_answer thất bại (%s), rớt về câu bịa thường", reason)
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},

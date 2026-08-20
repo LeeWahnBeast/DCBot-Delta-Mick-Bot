@@ -2433,13 +2433,17 @@ async def ai_cmd(interaction: discord.Interaction, noi_dung: str):
 
     if ai_chat.needs_web_search(noi_dung):
         status_msg = await interaction.followup.send("-# 🔎 đang tìm kiếm trên mạng...", wait=True)
-        result, ok = await ai_chat.search_answer(ai_chat.SYSTEM_PROMPT, noi_dung)
+        result, ok, reason = await ai_chat.search_answer(ai_chat.SYSTEM_PROMPT, noi_dung)
         if ok and result:
             final_text = ai_chat._sanitize_ai_output(result)
             if len(final_text) > 2000:
                 final_text = final_text[:1990] + "…"
         else:
-            final_text = "-# ⚠️ tìm kiếm lỗi\nSorry, hiện mình tìm kiếm không được (hết quota hoặc lỗi Gemini), thử hỏi lại sau nha 🙏"
+            final_text = (
+                "-# ⚠️ tìm kiếm lỗi\n"
+                "Sorry, hiện mình tìm kiếm không được, thử hỏi lại sau nha 🙏\n"
+                f"-# lý do: {reason}"
+            )
         await status_msg.edit(content=final_text)
         return
 
