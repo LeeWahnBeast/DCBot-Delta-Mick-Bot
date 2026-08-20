@@ -648,11 +648,13 @@ async def _announce_bot_update(old_version: float, bump_result: dict):
 
     # <t:UNIX:f> -> Discord tự render kèm nền xám nổi bật + tự đổi theo giờ
     # local của TỪNG người xem (không cần tự format tiếng Việt tay).
-    # "---" trên 1 dòng riêng (có dòng trống bao quanh) -> Discord tự vẽ
-    # 1 đường kẻ ngang thật (markdown horizontal rule), giống hệt cái gạch
-    # trong ảnh - không có cách nào "vẽ" đường kẻ này qua field hay code
-    # block, phải dùng đúng cú pháp markdown "---" này.
-    description = f"<t:{int(now.timestamp())}:f>\n\n---\n\n{bullets}"
+    # Discord KHÔNG hỗ trợ markdown "---" (chỉ hiện đúng 3 dấu gạch ngang
+    # dạng chữ, xác nhận qua thực tế lẫn tài liệu). Cách duy nhất để có 1
+    # đường kẻ ngang thật là lặp lại ký tự vẽ khung Unicode "─" (U+2500,
+    # không phải dấu gạch ngang "-" thường) liền nhau - loại ký tự này được
+    # thiết kế để nối liền mí với nhau nên nhìn như 1 đường thẳng liên tục.
+    divider = "─" * 34
+    description = f"<t:{int(now.timestamp())}:f>\n{divider}\n\n{bullets}"
 
     embed = discord.Embed(
         title=f"CẬP NHẬT {_format_version(bump_result['version'])}",
