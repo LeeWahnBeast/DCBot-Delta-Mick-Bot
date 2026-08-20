@@ -555,9 +555,11 @@ async def reset_emoji_stats() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# confession: thú tội ẩn danh (/confession) - chỉ lưu số thứ tự tăng dần và
-# 1 alias (mã đã băm) cho mỗi user, KHÔNG lưu nội dung thú tội (nội dung chỉ
-# tồn tại trong embed đã đăng lên Discord, bot không giữ log riêng).
+# confession: thú tội ẩn danh (/confession) - chỉ lưu số thứ tự tăng dần,
+# KHÔNG lưu nội dung thú tội (nội dung chỉ tồn tại trong embed đã đăng lên
+# Discord). Mỗi lần gửi lưu {id ngẫu nhiên -> user ID thật} để dev tra cứu
+# trực tiếp trong Firebase Console nếu có report/lạm dụng - không có lệnh
+# bot nào đọc ngược lại được, id hiện public trong embed không tự lộ ai gửi.
 # ---------------------------------------------------------------------------
 
 
@@ -573,22 +575,10 @@ async def next_confession_number() -> int:
         return 0
 
 
-async def get_confession_alias(alias: str) -> dict:
-    """alias: mã đã băm từ user ID (xem discord_bot._confession_alias), KHÔNG
-    phải user ID thật - dùng để đếm số thú tội đã gửi của cùng 1 người."""
-    return await _get_doc("confession_aliases", alias)
-
-
-async def bump_confession_alias(alias: str) -> int:
-    if _use_memory_fallback:
-        doc = _memory_store.setdefault(f"confession_aliases/{alias}", {"count": 0})
-        doc["count"] = doc.get("count", 0) + 1
-        return doc["count"]
-    try:
-        return await _atomic_update(f"confession_aliases/{_safe_key(alias)}/count", lambda v: (v or 0) + 1)
-    except Exception as e:
-        _warn_throttled("cập nhật alias thú tội", str(e))
-        return 0
+async def save_confession(random_id: str, data: dict) -> bool:
+    """random_id: mã ngẫu nhiên hiện public trong embed (không suy ra được
+    user). data nên có user_id, number, ts - chỉ dùng để dev tra cứu tay."""
+    return await _set_doc("confessions", _safe_key(random_id), data, merge=False)
 
 
 # ---------------------------------------------------------------------------

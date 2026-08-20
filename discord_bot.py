@@ -18,10 +18,8 @@ JS-VM hoặc dịch vụ trả phí). Chỉ còn giữ thông báo LIVE, vẫn d
 """
 
 import asyncio
-import base64
-import hashlib
-import hmac
 import random
+import secrets
 import time
 from datetime import datetime, timedelta, timezone
 
@@ -68,7 +66,6 @@ from config import (
     MEMBER_MILESTONE_STEP,
     CONFESSION_CHANNEL_ID,
     CONFESSION_COOLDOWN_SEC,
-    DISCORD_TOKEN,
     log,
 )
 from tiktok_client import TikTokClient
@@ -620,12 +617,6 @@ def _format_version(v: float) -> str:
     return s
 
 
-def _format_vn_datetime(dt: datetime) -> str:
-    """vd: '8 tháng 7 năm 2026 19:31' (giờ VN)."""
-    vn_dt = dt.astimezone(timezone(timedelta(hours=VN_UTC_OFFSET_HOURS)))
-    return f"{vn_dt.day} tháng {vn_dt.month} năm {vn_dt.year} {vn_dt.strftime('%H:%M')}"
-
-
 async def _announce_bot_update(old_version: float, bump_result: dict):
     """Sau khi version bump lúc khởi động (xem on_ready), nhờ AI tóm tắt cập
     nhật rồi đăng vào UPDATE_LOG_CHANNEL_ID. Chạy nền (fire-and-forget) để
@@ -643,10 +634,7 @@ async def _announce_bot_update(old_version: float, bump_result: dict):
     )
     now = discord.utils.utcnow()
     # Mỗi dòng "- ..." từ AI -> bullet "• ...", dòng tiêu đề mục (không có
-    # dấu "-" đầu dòng, vd "🐛 **Bản vá**:") giữ nguyên làm tiêu đề phụ -
-    # layout giống embed changelog của "Vựa Sử Quan": tiêu đề lớn "CẬP NHẬT
-    # x.x" + dòng ngày-giờ tô nền xám (code inline) + gạch ngang (tự có nhờ
-    # field riêng) + danh sách bullet.
+    # dấu "-" đầu dòng, vd "🐛 **Bản vá**:") giữ nguyên làm tiêu đề phụ.
     bullet_lines = []
     for raw in summary.splitlines():
         line = raw.strip()
@@ -658,12 +646,19 @@ async def _announce_bot_update(old_version: float, bump_result: dict):
             bullet_lines.append(line)
     bullets = "\n".join(bullet_lines) if bullet_lines else f"• {summary.strip()}"
 
+    # <t:UNIX:f> -> Discord tự render kèm nền xám nổi bật + tự đổi theo giờ
+    # local của TỪNG người xem (không cần tự format tiếng Việt tay).
+    # "---" trên 1 dòng riêng (có dòng trống bao quanh) -> Discord tự vẽ
+    # 1 đường kẻ ngang thật (markdown horizontal rule), giống hệt cái gạch
+    # trong ảnh - không có cách nào "vẽ" đường kẻ này qua field hay code
+    # block, phải dùng đúng cú pháp markdown "---" này.
+    description = f"<t:{int(now.timestamp())}:f>\n\n---\n\n{bullets}"
+
     embed = discord.Embed(
         title=f"CẬP NHẬT {_format_version(bump_result['version'])}",
-        description=f"`{_format_vn_datetime(now)}`",
+        description=description,
         color=discord.Color.from_rgb(43, 45, 49),
     )
-    embed.add_field(name="\u200b", value=bullets, inline=False)
     embed.set_footer(text=f"{bump_result.get('changed_files', 0)} file thay đổi · v{old_version:.2f} → v{bump_result['version']:.2f}")
     await channel.send(embed=embed)
 
@@ -2362,23 +2357,15 @@ async def ai_cmd(interaction: discord.Interaction, noi_dung: str):
 
 # ---------------------------------------------------------------------------
 # Slash command: Thú tội ẩn danh (/confession) - đăng vào CONFESSION_CHANNEL_ID
-# dưới dạng embed đánh số thứ tự, không hiện tên/avatar người gửi. Thay vào
-# đó embed hiện 1 "alias" (mã đã băm từ user ID bằng HMAC, KHÔNG thể đảo
-# ngược ra ID thật) để mọi người nhận ra 2 thú tội cùng 1 người mà không lộ
-# danh tính. Nhập nội dung qua Modal (mở form) vì content của slash command
-# option thường bị Discord tự ẩn/log lại trong audit, mở modal thì input chỉ
-# xuất hiện trong tương tác của riêng user đó.
+# dưới dạng embed đánh số thứ tự, không hiện tên/avatar người gửi. Mỗi lần
+# gửi -> 1 mã "ID" NGẪU NHIÊN riêng (không liên quan tới user, không lặp lại
+# giữa các lần gửi kể cả cùng 1 người), lưu vào Firestore kèm user ID thật
+# (xem db.save_confession) - CHỈ để dev tra cứu trực tiếp trong Firebase khi
+# có report/lạm dụng, không có lệnh bot nào tra ngược lại được. Nhập nội
+# dung qua Modal (mở form) vì input chỉ hiện trong tương tác riêng của user.
 # ---------------------------------------------------------------------------
 
 _confession_last_ts: dict[int, float] = {}
-
-
-def _confession_alias(user_id: int) -> str:
-    """Mã giả danh ổn định cho 1 user, không thể suy ngược ra user ID thật.
-    Dùng HMAC-SHA256 với khoá là token bot (chỉ bot mới biết) rồi cắt ngắn."""
-    key = (DISCORD_TOKEN or "confession-fallback-salt").encode()
-    digest = hmac.new(key, str(user_id).encode(), hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(digest)[:24].decode()
 
 
 class ConfessionModal(discord.ui.Modal, title="Gửi thú tội ẩn danh"):
@@ -2415,7 +2402,8 @@ class ConfessionModal(discord.ui.Modal, title="Gửi thú tội ẩn danh"):
 
         _confession_last_ts[interaction.user.id] = now
         number = await db.next_confession_number()
-        alias = _confession_alias(interaction.user.id)
+        random_id = secrets.token_urlsafe(24)  # random 100%, KHÔNG suy ra được từ user ID
+        await db.save_confession(random_id, {"user_id": interaction.user.id, "number": number, "ts": now})
 
         embed = discord.Embed(
             title=f"Lời Thú Tội Ẩn Danh #{number}",
@@ -2423,7 +2411,7 @@ class ConfessionModal(discord.ui.Modal, title="Gửi thú tội ẩn danh"):
             color=discord.Color.dark_purple(),
             timestamp=datetime.now(timezone.utc),
         )
-        embed.set_author(name=f"ID: {alias}")
+        embed.set_author(name=f"ID: {random_id}")
         embed.set_footer(text="Thú tội ẩn danh · không thể truy ra người gửi")
 
         await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
