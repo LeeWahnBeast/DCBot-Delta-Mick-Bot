@@ -659,7 +659,6 @@ async def _announce_bot_update(old_version: float, bump_result: dict):
     embed = discord.Embed(
         title=f"CẬP NHẬT {_format_version(bump_result['version'])}",
         description=description,
-        color=discord.Color.from_rgb(43, 45, 49),
     )
     embed.set_footer(text=f"{bump_result.get('changed_files', 0)} file thay đổi · v{old_version:.2f} → v{bump_result['version']:.2f}")
     await channel.send(embed=embed)
