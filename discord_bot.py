@@ -612,6 +612,20 @@ async def _announce_level_up(member: discord.Member, result: dict, channel=None)
         log.warning("Kiểm tra thành tựu sau voice XP lỗi: %s", e)
 
 
+def _format_version(v: float) -> str:
+    """2.20 -> '2.2', 2.61 -> '2.61', 1.0 -> '1.0' (giữ ít nhất 1 số lẻ cho đẹp)."""
+    s = f"{v:.2f}".rstrip("0")
+    if s.endswith("."):
+        s += "0"
+    return s
+
+
+def _format_vn_datetime(dt: datetime) -> str:
+    """vd: '8 tháng 7 năm 2026 19:31' (giờ VN)."""
+    vn_dt = dt.astimezone(timezone(timedelta(hours=VN_UTC_OFFSET_HOURS)))
+    return f"{vn_dt.day} tháng {vn_dt.month} năm {vn_dt.year} {vn_dt.strftime('%H:%M')}"
+
+
 async def _announce_bot_update(old_version: float, bump_result: dict):
     """Sau khi version bump lúc khởi động (xem on_ready), nhờ AI tóm tắt cập
     nhật rồi đăng vào UPDATE_LOG_CHANNEL_ID. Chạy nền (fire-and-forget) để
@@ -627,13 +641,30 @@ async def _announce_bot_update(old_version: float, bump_result: dict):
         diffs=bump_result.get("diffs", {}),
         removed_paths=bump_result.get("removed_paths", []),
     )
+    now = discord.utils.utcnow()
+    # Mỗi dòng "- ..." từ AI -> bullet "• ...", dòng tiêu đề mục (không có
+    # dấu "-" đầu dòng, vd "🐛 **Bản vá**:") giữ nguyên làm tiêu đề phụ -
+    # layout giống embed changelog của "Vựa Sử Quan": tiêu đề lớn "CẬP NHẬT
+    # x.x" + dòng ngày-giờ tô nền xám (code inline) + gạch ngang (tự có nhờ
+    # field riêng) + danh sách bullet.
+    bullet_lines = []
+    for raw in summary.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith("-"):
+            bullet_lines.append(f"• {line.lstrip('- ').strip()}")
+        else:
+            bullet_lines.append(line)
+    bullets = "\n".join(bullet_lines) if bullet_lines else f"• {summary.strip()}"
+
     embed = discord.Embed(
-        title=f"🔄 Bot vừa cập nhật · v{old_version:.2f} → v{bump_result['version']:.2f}",
-        description=summary,
-        color=discord.Color.blurple(),
-        timestamp=discord.utils.utcnow(),
+        title=f"CẬP NHẬT {_format_version(bump_result['version'])}",
+        description=f"`{_format_vn_datetime(now)}`",
+        color=discord.Color.from_rgb(43, 45, 49),
     )
-    embed.set_footer(text=f"{bump_result.get('changed_files', 0)} file thay đổi")
+    embed.add_field(name="\u200b", value=bullets, inline=False)
+    embed.set_footer(text=f"{bump_result.get('changed_files', 0)} file thay đổi · v{old_version:.2f} → v{bump_result['version']:.2f}")
     await channel.send(embed=embed)
 
 
