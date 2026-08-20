@@ -555,6 +555,43 @@ async def reset_emoji_stats() -> bool:
 
 
 # ---------------------------------------------------------------------------
+# confession: thú tội ẩn danh (/confession) - chỉ lưu số thứ tự tăng dần và
+# 1 alias (mã đã băm) cho mỗi user, KHÔNG lưu nội dung thú tội (nội dung chỉ
+# tồn tại trong embed đã đăng lên Discord, bot không giữ log riêng).
+# ---------------------------------------------------------------------------
+
+
+async def next_confession_number() -> int:
+    if _use_memory_fallback:
+        doc = _memory_store.setdefault("confession/counter", {"n": 0})
+        doc["n"] = doc.get("n", 0) + 1
+        return doc["n"]
+    try:
+        return await _atomic_update("confession/counter", lambda v: (v or 0) + 1)
+    except Exception as e:
+        _warn_throttled("tăng số thứ tự thú tội", str(e))
+        return 0
+
+
+async def get_confession_alias(alias: str) -> dict:
+    """alias: mã đã băm từ user ID (xem discord_bot._confession_alias), KHÔNG
+    phải user ID thật - dùng để đếm số thú tội đã gửi của cùng 1 người."""
+    return await _get_doc("confession_aliases", alias)
+
+
+async def bump_confession_alias(alias: str) -> int:
+    if _use_memory_fallback:
+        doc = _memory_store.setdefault(f"confession_aliases/{alias}", {"count": 0})
+        doc["count"] = doc.get("count", 0) + 1
+        return doc["count"]
+    try:
+        return await _atomic_update(f"confession_aliases/{_safe_key(alias)}/count", lambda v: (v or 0) + 1)
+    except Exception as e:
+        _warn_throttled("cập nhật alias thú tội", str(e))
+        return 0
+
+
+# ---------------------------------------------------------------------------
 # site: lượt xem + rating cho web dashboard
 # ---------------------------------------------------------------------------
 

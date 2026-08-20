@@ -18,6 +18,9 @@ JS-VM hoặc dịch vụ trả phí). Chỉ còn giữ thông báo LIVE, vẫn d
 """
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import random
 import time
 from datetime import datetime, timedelta, timezone
@@ -63,6 +66,9 @@ from config import (
     BOOST_CHANNEL_ID,
     MEMBER_MILESTONE_CHANNEL_ID,
     MEMBER_MILESTONE_STEP,
+    CONFESSION_CHANNEL_ID,
+    CONFESSION_COOLDOWN_SEC,
+    DISCORD_TOKEN,
     log,
 )
 from tiktok_client import TikTokClient
@@ -2324,6 +2330,83 @@ async def ai_cmd(interaction: discord.Interaction, noi_dung: str):
 
 
 # ---------------------------------------------------------------------------
+# Slash command: Thú tội ẩn danh (/confession) - đăng vào CONFESSION_CHANNEL_ID
+# dưới dạng embed đánh số thứ tự, không hiện tên/avatar người gửi. Thay vào
+# đó embed hiện 1 "alias" (mã đã băm từ user ID bằng HMAC, KHÔNG thể đảo
+# ngược ra ID thật) để mọi người nhận ra 2 thú tội cùng 1 người mà không lộ
+# danh tính. Nhập nội dung qua Modal (mở form) vì content của slash command
+# option thường bị Discord tự ẩn/log lại trong audit, mở modal thì input chỉ
+# xuất hiện trong tương tác của riêng user đó.
+# ---------------------------------------------------------------------------
+
+_confession_last_ts: dict[int, float] = {}
+
+
+def _confession_alias(user_id: int) -> str:
+    """Mã giả danh ổn định cho 1 user, không thể suy ngược ra user ID thật.
+    Dùng HMAC-SHA256 với khoá là token bot (chỉ bot mới biết) rồi cắt ngắn."""
+    key = (DISCORD_TOKEN or "confession-fallback-salt").encode()
+    digest = hmac.new(key, str(user_id).encode(), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest)[:24].decode()
+
+
+class ConfessionModal(discord.ui.Modal, title="Gửi thú tội ẩn danh"):
+    noi_dung = discord.ui.TextInput(
+        label="Nội dung thú tội (ẩn danh 100%)",
+        style=discord.TextStyle.paragraph,
+        max_length=1900,
+        placeholder="Kể đi, không ai biết là bạn đâu...",
+    )
+
+    async def on_submit(self, interaction: discord.Interaction):
+        now = time.time()
+        last = _confession_last_ts.get(interaction.user.id, 0)
+        remaining = CONFESSION_COOLDOWN_SEC - (now - last)
+        if remaining > 0:
+            await interaction.response.send_message(
+                f"⏳ Gửi hơi nhanh, đợi thêm **{int(remaining) + 1}s** rồi gửi thú tội tiếp nhé!",
+                ephemeral=True,
+            )
+            return
+
+        channel = client.get_channel(CONFESSION_CHANNEL_ID)
+        if channel is None:
+            await interaction.response.send_message(
+                "❌ Bot chưa tìm thấy kênh thú tội (chưa cấu hình hoặc bot không có quyền xem kênh).",
+                ephemeral=True,
+            )
+            return
+
+        text = ai_chat._sanitize_ai_output(str(self.noi_dung)).strip()
+        if not text:
+            await interaction.response.send_message("❌ Nội dung thú tội trống.", ephemeral=True)
+            return
+
+        _confession_last_ts[interaction.user.id] = now
+        number = await db.next_confession_number()
+        alias = _confession_alias(interaction.user.id)
+
+        embed = discord.Embed(
+            title=f"Lời Thú Tội Ẩn Danh #{number}",
+            description=text,
+            color=discord.Color.dark_purple(),
+            timestamp=datetime.now(timezone.utc),
+        )
+        embed.set_author(name=f"ID: {alias}")
+        embed.set_footer(text="Thú tội ẩn danh · không thể truy ra người gửi")
+
+        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        await interaction.response.send_message(
+            f"✅ Đã gửi thú tội **#{number}** ẩn danh vào {channel.mention}!", ephemeral=True
+        )
+
+
+@tree.command(name="confession", description="Gửi 1 lời thú tội ẩn danh 100% vào kênh thú tội")
+async def confession_cmd(interaction: discord.Interaction):
+    await interaction.response.send_modal(ConfessionModal())
+
+
+# ---------------------------------------------------------------------------
 # Slash command: Help - liệt kê toàn bộ lệnh theo nhóm, bấm nút để xem chi tiết
 # ---------------------------------------------------------------------------
 
@@ -2367,6 +2450,14 @@ _HELP_CATEGORIES = [
         "commands": [
             ("/ask-ai [noi_dung]", "Chat trực tiếp với AI của bot"),
             ("/dictionary", "Tra từ hoặc dạy bot nghĩa từ mới — bấm nút, nhập qua form"),
+        ],
+    },
+    {
+        "key": "confession",
+        "label": "Thú tội ẩn danh",
+        "emoji": "🤫",
+        "commands": [
+            ("/confession", "Gửi 1 lời thú tội ẩn danh 100% vào kênh thú tội — nhập qua form"),
         ],
     },
 ]

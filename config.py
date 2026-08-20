@@ -130,6 +130,14 @@ AI_CHAT_CHANNEL_ID = int(os.environ.get("AI_CHAT_CHANNEL_ID", "15285904770735841
 # tóm tắt cập nhật ngắn rồi bot tự đăng vào đây.
 UPDATE_LOG_CHANNEL_ID = int(os.environ.get("UPDATE_LOG_CHANNEL_ID", "1539484617663324230"))
 
+# --- Kênh đăng thú tội ẩn danh (/confession, xem CONFESSION_MODAL trong
+# discord_bot.py): mọi tin thú tội được đăng ở đây dưới dạng embed đánh số
+# thứ tự, KHÔNG hiện tên/avatar người gửi - chỉ hiện 1 mã "ID" đã băm
+# (hash) để phân biệt các thú tội của cùng 1 người mà không lộ danh tính
+# thật (xem db.get_confession_alias trong db.py) ---
+CONFESSION_CHANNEL_ID = int(os.environ.get("CONFESSION_CHANNEL_ID", "0") or 0) or 1539855082210861126
+CONFESSION_COOLDOWN_SEC = int(os.environ.get("CONFESSION_COOLDOWN_SEC", "60"))
+
 # --- Thông báo Boost server: nhắn khi 1 member vừa bắt đầu boost (không
 # phải tổng số boost của server) - xem on_member_update trong discord_bot.py ---
 BOOST_CHANNEL_ID = int(os.environ.get("BOOST_CHANNEL_ID", "0") or 0) or 1531291586909044736
