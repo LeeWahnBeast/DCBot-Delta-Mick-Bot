@@ -12,6 +12,7 @@ thay đổi, hiển thị trên web dashboard:
 Ví dụ: 1.0 -> (sửa 6 file) -> 1.5 -> (sửa 2 file) -> 1.6 -> (sửa 1 file) -> 1.61
 """
 
+import difflib
 import hashlib
 import os
 import time
@@ -44,6 +45,11 @@ VERSION_BUMP_TINY = 0.01
 
 DEFAULT_START_VERSION = 1.0
 
+# Diff nội dung thật (không chỉ tên file) đưa cho AI viết changelog - giới
+# hạn số dòng/file và số file để tránh prompt quá dài (đỡ tốn token Groq).
+DIFF_MAX_LINES_PER_FILE = 40
+DIFF_MAX_FILES = 10
+
 
 def _scan_source_hashes(root: str = ".") -> dict[str, str]:
     """Trả về {đường dẫn tương đối: sha256 nội dung} cho toàn bộ file .py
@@ -72,6 +78,54 @@ def _bump_amount(changed_count: int) -> float:
     return VERSION_BUMP_TINY
 
 
+async def _save_content_snapshot(paths: list[str], root: str = ".") -> None:
+    """Lưu nội dung hiện tại của TOÀN BỘ file (không giới hạn DIFF_MAX_FILES)
+    làm baseline cho lần diff kế tiếp - dùng khi bật tính năng lần đầu."""
+    for rel_path in paths:
+        full_path = os.path.join(root, rel_path)
+        try:
+            with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+        except OSError:
+            continue
+        await db.save_source_file_content(_escape_path_key(rel_path), content)
+
+
+async def _build_content_diffs(changed_paths: list[str], root: str = ".") -> dict[str, str]:
+    """Với mỗi file vừa đổi, so nội dung MỚI (đọc từ đĩa) với nội dung CŨ đã
+    lưu lần trước trong Firebase (version_file_contents), trả về {đường dẫn:
+    đoạn diff rút gọn (chỉ dòng thêm/xoá thật sự, tối đa DIFF_MAX_LINES_PER_FILE
+    dòng)}. Đây là nội dung THẬT (không phải đoán theo tên file) để AI viết
+    changelog đúng, tránh bịa/nói tùm xàm. Đồng thời lưu lại nội dung mới để
+    lần sau diff tiếp tục so từ đây. Chỉ xử lý tối đa DIFF_MAX_FILES file đầu
+    tiên, đủ để changelog có ý nghĩa mà không làm prompt AI phình quá to."""
+    diffs: dict[str, str] = {}
+    for rel_path in changed_paths[:DIFF_MAX_FILES]:
+        full_path = os.path.join(root, rel_path)
+        try:
+            with open(full_path, "r", encoding="utf-8", errors="ignore") as f:
+                new_content = f.read()
+        except OSError:
+            continue
+
+        key = _escape_path_key(rel_path)
+        old_content = await db.get_source_file_content(key)
+
+        if not old_content:
+            diffs[rel_path] = "(file mới)"
+        else:
+            diff_lines = list(difflib.unified_diff(
+                old_content.splitlines(), new_content.splitlines(), lineterm="", n=0,
+            ))
+            body = [ln for ln in diff_lines if ln[:1] in "+-" and not ln.startswith(("+++", "---"))]
+            body = body[:DIFF_MAX_LINES_PER_FILE]
+            diffs[rel_path] = "\n".join(body) if body else "(chỉ đổi định dạng/khoảng trắng, không đổi logic)"
+
+        await db.save_source_file_content(key, new_content)
+
+    return diffs
+
+
 async def check_and_bump_version(root: str = ".") -> dict:
     """Gọi 1 LẦN lúc bot khởi động (on_ready). So sánh hash file .py hiện tại
     với lần lưu trước trong Firebase (bot_state), tự tăng version nếu có file
@@ -93,6 +147,10 @@ async def check_and_bump_version(root: str = ".") -> dict:
     if not old_hashes:
         # Lần đầu tiên bật tính năng version tracking (chưa có hash cũ để so
         # sánh) -> chỉ lưu mốc ban đầu, không bump để tránh nhảy version ảo.
+        # Vẫn lưu luôn NỘI DUNG file làm baseline, để lần thay đổi tiếp theo
+        # đã diff được thật (nếu không, lần đổi đầu tiên sẽ báo "(file mới)"
+        # hết cho mọi file dù chỉ sửa 1 dòng).
+        await _save_content_snapshot(list(new_hashes.keys()), root)
         await db.save_bot_state({
             "version": old_version,
             "version_file_hashes": new_hashes_escaped,
@@ -105,6 +163,8 @@ async def check_and_bump_version(root: str = ".") -> dict:
 
     bump = _bump_amount(changed_count)
     new_version = round(old_version + bump, 2)
+
+    diffs = await _build_content_diffs(changed, root)
 
     await db.save_bot_state({
         "version": new_version,
@@ -123,4 +183,5 @@ async def check_and_bump_version(root: str = ".") -> dict:
         "changed_files": changed_count,
         "changed_paths": changed,
         "removed_paths": removed,
+        "diffs": diffs,
     }

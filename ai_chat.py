@@ -180,36 +180,47 @@ async def generate_auto_message() -> str | None:
 # ---------------------------------------------------------------------------
 
 
+_DIFF_BLOCK_MAX_CHARS = 6000  # chặn prompt phình quá to nếu đổi nhiều file/nhiều dòng
+
+
 async def summarize_bot_update(
-    old_version: float, new_version: float, changed_paths: list[str], removed_paths: list[str]
+    old_version: float, new_version: float, diffs: dict[str, str], removed_paths: list[str]
 ) -> str:
-    """Nhờ AI viết 1 đoạn changelog ngắn dựa trên danh sách file mã nguồn vừa
-    đổi/thêm/xoá. Nếu không gọi được Groq (thiếu API key, lỗi mạng...) thì tự
-    rớt về 1 bản liệt kê file thuần (không có gì gọi AI cũng không lỗi)."""
-    changed_list = "\n".join(f"- {p}" for p in changed_paths) or "(không có)"
+    """Nhờ AI viết 1 đoạn changelog ngắn dựa trên DIFF NỘI DUNG THẬT (dòng
+    thêm/xoá thật sự, không phải đoán theo tên file như trước) để tránh AI
+    bịa/nói tùm xàm những tính năng không có thật. Nếu không gọi được Groq
+    (thiếu API key, lỗi mạng...) thì tự rớt về 1 bản liệt kê file thuần."""
+    if diffs:
+        parts = []
+        for path, diff_text in diffs.items():
+            parts.append(f"--- {path} ---\n{diff_text}")
+        diff_block = "\n\n".join(parts)
+        if len(diff_block) > _DIFF_BLOCK_MAX_CHARS:
+            diff_block = diff_block[:_DIFF_BLOCK_MAX_CHARS] + "\n... (cắt bớt, còn nhiều thay đổi khác)"
+    else:
+        diff_block = "(không có)"
     removed_list = "\n".join(f"- {p}" for p in removed_paths) or "(không có)"
 
     messages = [
         {
             "role": "system",
             "content": (
-                "Bạn là trợ lý viết changelog cho 1 bot Discord tên Mick Bot. "
-                "Dựa vào danh sách TÊN FILE mã nguồn Python vừa thay đổi (không có nội dung "
-                "diff chi tiết), hãy đoán và viết 1 đoạn changelog ngắn gọn (3-6 dòng, tiếng "
-                "Việt, dùng gạch đầu dòng), nêu khả năng những tính năng/module nào vừa được "
-                "cập nhật dựa theo tên file (vd: discord_bot.py -> lệnh/slash command, "
-                "economy.py -> hệ kinh tế MICK, features.py -> minigame/quest/daily, "
-                "level_card.py -> ảnh level card, db.py -> lưu trữ dữ liệu, ai_chat.py -> AI "
-                "chat, web_server.py -> dashboard web...). Không bịa chi tiết cụ thể không "
-                "suy ra được từ tên file, chỉ nói chung chung kiểu 'có khả năng đã cập nhật...'. "
-                "Không thêm lời chào hay lời dẫn thừa, vào thẳng nội dung changelog."
+                "Bạn là trợ lý viết changelog cho 1 bot Discord tên Mick Bot. Bạn sẽ được đưa "
+                "DIFF NỘI DUNG THẬT của các file mã nguồn Python vừa thay đổi: mỗi dòng bắt đầu "
+                "bằng '+' là dòng MỚI THÊM, bắt đầu bằng '-' là dòng BỊ XOÁ. "
+                "CHỈ được viết changelog dựa trên những gì THẬT SỰ xuất hiện trong diff (tên lệnh/"
+                "hàm/biến/chuỗi text mới thấy được) - TUYỆT ĐỐI KHÔNG suy diễn, đoán mò hay bịa ra "
+                "tính năng không có trong diff. Nếu 1 file có diff quá kỹ thuật/khó hiểu ý nghĩa, chỉ "
+                "cần nói ngắn gọn 'cập nhật nội bộ ở <tên file>', đừng cố suy diễn thêm. "
+                "Viết 3-6 dòng, tiếng Việt, dùng gạch đầu dòng. Không chào hỏi, không lời dẫn thừa, "
+                "vào thẳng nội dung changelog."
             ),
         },
         {
             "role": "user",
             "content": (
                 f"Bot vừa cập nhật từ version {old_version:.2f} lên {new_version:.2f}.\n\n"
-                f"File thay đổi/thêm mới:\n{changed_list}\n\n"
+                f"Diff các file thay đổi:\n{diff_block}\n\n"
                 f"File bị xoá:\n{removed_list}"
             ),
         },
@@ -219,7 +230,7 @@ async def summarize_bot_update(
         return _sanitize_ai_output(result)
 
     lines = [f"📦 Cập nhật version **{old_version:.2f} → {new_version:.2f}**", "File thay đổi:"]
-    lines += [f"- `{p}`" for p in changed_paths[:15]]
+    lines += [f"- `{p}`" for p in list(diffs.keys())[:15]]
     if removed_paths:
         lines.append("File bị xoá:")
         lines += [f"- `{p}`" for p in removed_paths[:10]]

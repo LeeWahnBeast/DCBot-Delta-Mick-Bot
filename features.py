@@ -771,16 +771,37 @@ def _new_game_id() -> str:
     return gid
 
 
+# Ván "playing" bị BỎ DỞ (user thoát ngang, không bấm Stop/không chơi tiếp)
+# thì KHÔNG BAO GIỜ tự chuyển status khác "playing" -> _gc_games() cũ chỉ dọn
+# ván đã xong (status != "playing") nên các ván bỏ dở này ở lại RAM MÃI MÃI,
+# đây là 1 nguồn rò rỉ bộ nhớ thật sự nếu server chơi minigame nhiều mà
+# không phải ai cũng bấm Stop. Dọn luôn ván "playing" quá cũ theo created_at.
+_ABANDONED_GAME_TTL_SEC = 6 * 3600  # 6 giờ không động tới coi như bỏ dở
+
+
 def _gc_games() -> None:
-    """Dọn RAM: xoá ván đã kết thúc quá GAME_LOOKUP_TTL_SEC (tránh rò rỉ bộ nhớ)."""
+    """Dọn RAM: xoá ván đã kết thúc quá GAME_LOOKUP_TTL_SEC, VÀ xoá ván
+    "playing" bị bỏ dở quá _ABANDONED_GAME_TTL_SEC (tránh rò rỉ bộ nhớ)."""
     now = time.time()
     stale = [
         gid
         for gid, g in _active_games.items()
-        if g.get("status") != "playing" and now - g.get("finished_at", now) > GAME_LOOKUP_TTL_SEC
+        if (
+            (g.get("status") != "playing" and now - g.get("finished_at", now) > GAME_LOOKUP_TTL_SEC)
+            or (g.get("status") == "playing" and now - g.get("created_at", now) > _ABANDONED_GAME_TTL_SEC)
+        )
     ]
     for gid in stale:
         _active_games.pop(gid, None)
+
+
+def cleanup_stale_games() -> int:
+    """Wrapper public cho _gc_games() - gọi định kỳ từ 1 tasks.loop trong
+    discord_bot.py (KHÔNG chỉ dọn khi có người /tra-game như trước, vì ván
+    bị bỏ dở có thể không ai tra tới -> nằm lại RAM mãi mãi). Trả về số
+    lượng RAM entry hiện có SAU khi dọn (để log theo dõi)."""
+    _gc_games()
+    return len(_active_games)
 
 
 def lookup_game(game_id: str) -> discord.Embed | None:

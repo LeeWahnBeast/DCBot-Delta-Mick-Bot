@@ -59,14 +59,21 @@ async def _check_live_and_avatar(username: str) -> tuple[bool, str | None]:
         log.warning("TikTokLive check @%s lỗi: %s", username, e)
     finally:
         # Đóng session HTTP nội bộ của client nếu có, tránh rò rỉ connection
-        # (mỗi lần gọi hàm này tạo 1 client mới - xem check_tiktok_loop).
-        web = getattr(live_client, "web", None)
-        close = getattr(web, "close", None)
-        if callable(close):
-            try:
-                await close()
-            except Exception:
-                pass
+        # (mỗi lần gọi hàm này tạo 1 client mới - xem check_tiktok_loop, mặc
+        # định 120s/lần -> hàng trăm-nghìn client được tạo mỗi tháng, chỉ cần
+        # rò rỉ nhỏ mỗi lần cũng cộng dồn thành OOM sau vài tuần chạy). Thử
+        # TẤT CẢ các cách đóng có thể có tuỳ version thư viện TikTokLive.
+        for attr, method_name in (("web", "close"), (None, "disconnect"), (None, "close")):
+            obj = getattr(live_client, attr, None) if attr else live_client
+            method = getattr(obj, method_name, None) if obj else None
+            if callable(method):
+                try:
+                    result = method()
+                    if hasattr(result, "__await__"):
+                        await result
+                except Exception:
+                    pass
+        live_client = None
     return is_live, avatar_url
 
 

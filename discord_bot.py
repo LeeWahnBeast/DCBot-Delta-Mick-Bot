@@ -487,6 +487,11 @@ async def learn_word_flush_loop():
     except Exception as e:
         log.warning("Flush emoji định kỳ lỗi: %s", e)
 
+    try:
+        features.cleanup_stale_games()
+    except Exception as e:
+        log.warning("Dọn ván minigame bỏ dở lỗi: %s", e)
+
 
 @learn_word_flush_loop.before_loop
 async def before_learn_word_flush_loop():
@@ -611,7 +616,7 @@ async def _announce_bot_update(old_version: float, bump_result: dict):
     summary = await ai_chat.summarize_bot_update(
         old_version=old_version,
         new_version=bump_result["version"],
-        changed_paths=bump_result.get("changed_paths", []),
+        diffs=bump_result.get("diffs", {}),
         removed_paths=bump_result.get("removed_paths", []),
     )
     embed = discord.Embed(
@@ -1047,17 +1052,32 @@ def _current_role_text(target: discord.Member) -> str:
     return top.mention
 
 
-async def _build_profile_embed(target: discord.Member) -> discord.Embed:
+def _xp_progress_bar(xp: int, xp_needed: int, length: int = 12) -> str:
+    """Vẽ thanh tiến trình XP dạng text (vd ▰▰▰▰▱▱▱▱▱▱▱▱) cho embed profile."""
+    if xp_needed <= 0:
+        filled = length
+    else:
+        filled = max(0, min(length, round(length * xp / xp_needed)))
+    return "▰" * filled + "▱" * (length - filled)
+
+
+async def _build_profile_embed(target: discord.Member) -> tuple[discord.Embed, discord.File]:
     data = await economy.get_profile(target.id)
-    embed = discord.Embed(title=f"📊 Hồ sơ của {target.display_name}", color=discord.Color.blurple())
-    embed.add_field(name="MICK", value=f"{MICKCOIN_EMOJI} {economy.format_mick(data['mick'])}", inline=True)
-    embed.add_field(name="Vé", value=f"{TICKET_EMOJI} {economy.format_ve(data['ve'])}", inline=True)
-    embed.add_field(name="Level", value=str(data["level"]), inline=True)
-    embed.add_field(name="XP", value=f"{data['xp']}/{data['xp_needed']}", inline=True)
+    rank, _total = await _get_level_rank(target.id)
+
+    embed = discord.Embed(color=target.color if target.color.value else discord.Color.blurple())
+    embed.set_author(name=f"Hồ sơ của {target.display_name}", icon_url=target.display_avatar.url)
+
+    bar = _xp_progress_bar(data["xp"], data["xp_needed"])
+    embed.add_field(
+        name=f"🏅 Level {data['level']} · Rank #{rank}",
+        value=f"{bar}\n`{data['xp']}/{data['xp_needed']} XP`",
+        inline=False,
+    )
+    embed.add_field(name="💰 Ví", value=f"{MICKCOIN_EMOJI} {economy.format_mick(data['mick'])} MICK\n{TICKET_EMOJI} {economy.format_ve(data['ve'])} Vé", inline=True)
 
     status = _STATUS_LABELS.get(getattr(target, "status", discord.Status.offline), "⚫ Offline")
-    embed.add_field(name="Trạng thái", value=status, inline=True)
-    embed.add_field(name="Role hiện tại", value=_current_role_text(target), inline=True)
+    embed.add_field(name="📶 Trạng thái", value=f"{status}\n{_current_role_text(target)}", inline=True)
     embed.add_field(
         name="🔥 Chuỗi Daily",
         value=features.format_streak_line(data.get("daily_streak", 0), data.get("daily_history", [])),
@@ -1065,24 +1085,24 @@ async def _build_profile_embed(target: discord.Member) -> discord.Embed:
     )
 
     created_ts = int(target.created_at.timestamp())
-    embed.add_field(
-        name="📅 Tạo tài khoản Discord",
-        value=f"<t:{created_ts}:F> (<t:{created_ts}:R>)",
-        inline=False,
-    )
-
     joined_at = getattr(target, "joined_at", None)
+    dates = f"📅 Tạo tài khoản: <t:{created_ts}:R>"
     if joined_at:
-        joined_ts = int(joined_at.timestamp())
-        embed.add_field(
-            name="📥 Vào server",
-            value=f"<t:{joined_ts}:F> (<t:{joined_ts}:R>)",
-            inline=False,
-        )
+        dates += f"\n📥 Vào server: <t:{int(joined_at.timestamp())}:R>"
+    embed.add_field(name="\u200b", value=dates, inline=False)
 
-    embed.set_thumbnail(url=target.display_avatar.url)
+    buf = await level_card.render_level_card(
+        display_name=target.display_name,
+        avatar_url=target.display_avatar.replace(size=256).url,
+        level=data["level"],
+        xp=data["xp"],
+        xp_needed=data["xp_needed"],
+        rank=rank,
+    )
+    file = discord.File(buf, filename="profile_card.png")
+    embed.set_image(url="attachment://profile_card.png")
     embed.set_footer(text=f"UUID: {data.get('uuid', '?')}")
-    return embed
+    return embed, file
 
 
 class ProfileView(discord.ui.View):
@@ -1102,8 +1122,8 @@ class ProfileView(discord.ui.View):
     @discord.ui.button(label="Hồ sơ", emoji="📊", style=discord.ButtonStyle.primary)
     async def btn_profile(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        embed = await _build_profile_embed(self.target)
-        await interaction.edit_original_response(embed=embed, attachments=[], view=self)
+        embed, file = await _build_profile_embed(self.target)
+        await interaction.edit_original_response(embed=embed, attachments=[file], view=self)
 
     @discord.ui.button(label="Level Card", emoji="🖼️", style=discord.ButtonStyle.secondary)
     async def btn_level(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1134,9 +1154,10 @@ class ProfileView(discord.ui.View):
 @discord.app_commands.describe(thanh_vien="Xem của người khác (bỏ trống để xem của bạn)")
 async def profile_cmd(interaction: discord.Interaction, thanh_vien: discord.Member = None):
     target = thanh_vien or interaction.user
-    embed = await _build_profile_embed(target)
+    await interaction.response.defer()
+    embed, file = await _build_profile_embed(target)
     view = ProfileView(target=target, owner_id=interaction.user.id)
-    await interaction.response.send_message(embed=embed, view=view)
+    await interaction.followup.send(embed=embed, file=file, view=view)
 
 
 @tree.command(name="level", description="Xem level (cấp độ) hiện tại của bạn hoặc người khác, kèm ảnh thẻ level")
@@ -1847,8 +1868,8 @@ class LeaderboardView(discord.ui.View):
             await interaction.response.send_message("Không tìm thấy thành viên này trong server.", ephemeral=True)
             return
 
-        embed = await _build_profile_embed(member)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        embed, file = await _build_profile_embed(member)
+        await interaction.response.send_message(embed=embed, file=file, ephemeral=True)
 
     @discord.ui.button(label="Xem thêm", emoji="➕", style=discord.ButtonStyle.secondary)
     async def btn_more(self, interaction: discord.Interaction, button: discord.ui.Button):

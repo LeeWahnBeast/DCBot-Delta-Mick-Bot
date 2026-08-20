@@ -314,6 +314,23 @@ async def save_bot_state(state: dict) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# version_file_contents: nội dung TOÀN VĂN của mỗi file .py tại lần đổi gần
+# nhất - dùng để tính diff THẬT (không chỉ tên file) khi viết changelog cập
+# nhật bot (xem versioning._build_content_diffs). Ghi đè hoàn toàn mỗi lần
+# (merge=False) vì field "content" luôn thay thế toàn bộ, không cộng dồn.
+# ---------------------------------------------------------------------------
+
+
+async def get_source_file_content(key: str) -> str:
+    doc = await _get_doc("version_file_contents", key)
+    return doc.get("content", "") if doc else ""
+
+
+async def save_source_file_content(key: str, content: str) -> bool:
+    return await _set_doc("version_file_contents", key, {"content": content}, merge=False)
+
+
+# ---------------------------------------------------------------------------
 # invite_codes: map link mời (Discord invite code) do bot TỰ TẠO cho quest
 # "mời bạn bè" -> user sở hữu link đó. Dùng để xác định chính xác ai vừa được
 # cộng MICK khi có người join qua link, KHÔNG dựa vào invite.inviter (vì link
