@@ -669,7 +669,11 @@ async def _announce_bot_update(old_version: float, bump_result: dict):
             else:
                 sections.append(("Cập nhật:", [bullet]))
         else:
-            sections.append((line.rstrip(":") + ":", []))
+            # AI có thể tự bold sẵn tên mục (vd "🐛 **Bản vá**:") - bóc hết
+            # "**" có sẵn ra để lát nữa bọc lại ĐÚNG 1 LỚP bold, tránh bị
+            # lồng "****" (2 lớp bold) khi TextDisplay bọc thêm lần nữa.
+            name = line.rstrip(":").replace("**", "").strip()
+            sections.append((name + ":", []))
     if not sections:
         sections = [("Cập nhật:", [f"• {summary.strip()}"])]
     if not ai_ok:
@@ -1090,19 +1094,25 @@ async def _get_level_rank(user_id: int) -> tuple[int, int]:
     return position, len(users)
 
 
-async def _build_rank_embed(target: discord.Member) -> discord.Embed:
+async def _build_rank_container(target: discord.Member) -> discord.ui.Container:
     profile = await economy.get_profile(target.id)
     position, total = await _get_level_rank(target.id)
 
     bar = _progress_bar(profile["xp"], profile["xp_needed"])
-    embed = discord.Embed(title=f"🏅 Rank của {target.display_name}", color=discord.Color.blurple())
-    embed.add_field(name="Hạng", value=f"#{position}/{total}", inline=True)
-    embed.add_field(name="Level", value=str(profile["level"]), inline=True)
-    embed.add_field(name="MICK", value=f"{MICKCOIN_EMOJI} {economy.format_mick(profile['mick'])}", inline=True)
-    embed.add_field(name="Vé", value=f"{TICKET_EMOJI} {economy.format_ve(profile['ve'])}", inline=True)
-    embed.add_field(name="XP", value=f"{bar}\n{profile['xp']}/{profile['xp_needed']}", inline=False)
-    embed.set_thumbnail(url=target.display_avatar.url)
-    return embed
+    container = discord.ui.Container(accent_color=discord.Color.blurple())
+    container.add_item(
+        discord.ui.Section(
+            discord.ui.TextDisplay(f"### 🏅 Rank của {target.display_name}"),
+            discord.ui.TextDisplay(
+                f"**Hạng:** #{position}/{total} · **Level:** {profile['level']}\n"
+                f"**MICK:** {MICKCOIN_EMOJI} {economy.format_mick(profile['mick'])} · "
+                f"**Vé:** {TICKET_EMOJI} {economy.format_ve(profile['ve'])}\n"
+                f"**XP:** {bar}\n{profile['xp']}/{profile['xp_needed']}"
+            ),
+            accessory=discord.ui.Thumbnail(target.display_avatar.url),
+        )
+    )
+    return container
 
 
 _STATUS_LABELS = {
@@ -1132,35 +1142,9 @@ def _xp_progress_bar(xp: int, xp_needed: int, length: int = 12) -> str:
     return "▰" * filled + "▱" * (length - filled)
 
 
-async def _build_profile_embed(target: discord.Member) -> tuple[discord.Embed, discord.File]:
+async def _build_profile_content(target: discord.Member) -> tuple[discord.ui.Container, discord.File]:
     data = await economy.get_profile(target.id)
     rank, _total = await _get_level_rank(target.id)
-
-    embed = discord.Embed(color=target.color if target.color.value else discord.Color.blurple())
-    embed.set_author(name=f"Hồ sơ của {target.display_name}", icon_url=target.display_avatar.url)
-
-    bar = _xp_progress_bar(data["xp"], data["xp_needed"])
-    embed.add_field(
-        name=f"🏅 Level {data['level']} · Rank #{rank}",
-        value=f"{bar}\n`{data['xp']}/{data['xp_needed']} XP`",
-        inline=False,
-    )
-    embed.add_field(name="💰 Ví", value=f"{MICKCOIN_EMOJI} {economy.format_mick(data['mick'])} MICK\n{TICKET_EMOJI} {economy.format_ve(data['ve'])} Vé", inline=True)
-
-    status = _STATUS_LABELS.get(getattr(target, "status", discord.Status.offline), "⚫ Offline")
-    embed.add_field(name="📶 Trạng thái", value=f"{status}\n{_current_role_text(target)}", inline=True)
-    embed.add_field(
-        name="🔥 Chuỗi Daily",
-        value=features.format_streak_line(data.get("daily_streak", 0), data.get("daily_history", [])),
-        inline=False,
-    )
-
-    created_ts = int(target.created_at.timestamp())
-    joined_at = getattr(target, "joined_at", None)
-    dates = f"📅 Tạo tài khoản: <t:{created_ts}:R>"
-    if joined_at:
-        dates += f"\n📥 Vào server: <t:{int(joined_at.timestamp())}:R>"
-    embed.add_field(name="\u200b", value=dates, inline=False)
 
     buf = await level_card.render_level_card(
         display_name=target.display_name,
@@ -1171,18 +1155,64 @@ async def _build_profile_embed(target: discord.Member) -> tuple[discord.Embed, d
         rank=rank,
     )
     file = discord.File(buf, filename="profile_card.png")
-    embed.set_image(url="attachment://profile_card.png")
-    embed.set_footer(text=f"UUID: {data.get('uuid', '?')}")
-    return embed, file
+
+    container = discord.ui.Container(accent_color=target.color if target.color.value else discord.Color.blurple())
+    container.add_item(discord.ui.TextDisplay(f"### Hồ sơ của {target.display_name}"))
+    container.add_item(discord.ui.Separator(visible=True))
+
+    bar = _xp_progress_bar(data["xp"], data["xp_needed"])
+    container.add_item(
+        discord.ui.TextDisplay(f"**🏅 Level {data['level']} · Rank #{rank}**\n{bar}\n`{data['xp']}/{data['xp_needed']} XP`")
+    )
+    status = _STATUS_LABELS.get(getattr(target, "status", discord.Status.offline), "⚫ Offline")
+    container.add_item(
+        discord.ui.TextDisplay(
+            f"**💰 Ví**\n{MICKCOIN_EMOJI} {economy.format_mick(data['mick'])} MICK\n{TICKET_EMOJI} {economy.format_ve(data['ve'])} Vé\n\n"
+            f"**📶 Trạng thái**\n{status}\n{_current_role_text(target)}"
+        )
+    )
+    container.add_item(
+        discord.ui.TextDisplay(
+            f"**🔥 Chuỗi Daily**\n{features.format_streak_line(data.get('daily_streak', 0), data.get('daily_history', []))}"
+        )
+    )
+
+    created_ts = int(target.created_at.timestamp())
+    joined_at = getattr(target, "joined_at", None)
+    dates = f"📅 Tạo tài khoản: <t:{created_ts}:R>"
+    if joined_at:
+        dates += f"\n📥 Vào server: <t:{int(joined_at.timestamp())}:R>"
+    container.add_item(discord.ui.TextDisplay(dates))
+    container.add_item(discord.ui.Separator(visible=True))
+    container.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem(f"attachment://{file.filename}")))
+    container.add_item(discord.ui.TextDisplay(f"-# UUID: {data.get('uuid', '?')}"))
+    return container, file
 
 
-class ProfileView(discord.ui.View):
-    """Gộp /profile + /level + /rank cũ: 3 nút chuyển view trên cùng 1 message."""
+class _SimpleContainerLayout(discord.ui.LayoutView):
+    """LayoutView dùng 1 lần, chỉ để bọc 1 Container có sẵn (không có nút) -
+    dùng cho mấy chỗ chỉ cần hiện hồ sơ 1 lần, không cần đổi qua lại view."""
+
+    def __init__(self, container: discord.ui.Container):
+        super().__init__(timeout=1)
+        self.add_item(container)
+
+
+class ProfileLayoutView(discord.ui.LayoutView):
+    """Components V2 - thay cho ProfileView (embed) cũ. Gộp /profile +
+    /level + /rank cũ: 3 nút chuyển nội dung trên cùng 1 message."""
 
     def __init__(self, target: discord.Member, owner_id: int):
         super().__init__(timeout=90)
         self.target = target
         self.owner_id = owner_id
+        self._container = discord.ui.Container()
+        self.add_item(self._container)
+        row = discord.ui.ActionRow()
+        row.add_item(self._make_button("Hồ sơ", "📊", discord.ButtonStyle.primary, self._fill_profile))
+        row.add_item(self._make_button("Level Card", "🖼️", discord.ButtonStyle.secondary, self._fill_level))
+        row.add_item(self._make_button("Rank", "🏅", discord.ButtonStyle.secondary, self._fill_rank))
+        self.add_item(row)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
@@ -1190,15 +1220,22 @@ class ProfileView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Hồ sơ", emoji="📊", style=discord.ButtonStyle.primary)
-    async def btn_profile(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        embed, file = await _build_profile_embed(self.target)
-        await interaction.edit_original_response(embed=embed, attachments=[file], view=self)
+    def _make_button(self, label: str, emoji: str, style: discord.ButtonStyle, handler) -> discord.ui.Button:
+        button = discord.ui.Button(label=label, emoji=emoji, style=style)
 
-    @discord.ui.button(label="Level Card", emoji="🖼️", style=discord.ButtonStyle.secondary)
-    async def btn_level(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
+        async def callback(interaction: discord.Interaction):
+            await interaction.response.defer()
+            await handler(interaction)
+
+        button.callback = callback
+        return button
+
+    async def _fill_profile(self, interaction: discord.Interaction):
+        new_container, file = await _build_profile_content(self.target)
+        self._replace_container(new_container)
+        await interaction.edit_original_response(view=self, attachments=[file])
+
+    async def _fill_level(self, interaction: discord.Interaction):
         profile = await economy.get_profile(self.target.id)
         rank, _total = await _get_level_rank(self.target.id)
         buf = await level_card.render_level_card(
@@ -1210,15 +1247,24 @@ class ProfileView(discord.ui.View):
             rank=rank,
         )
         file = discord.File(buf, filename="level.png")
-        embed = discord.Embed(title=f"🖼️ Level card của {self.target.display_name}", color=discord.Color.blurple())
-        embed.set_image(url="attachment://level.png")
-        await interaction.edit_original_response(embed=embed, attachments=[file], view=self)
+        new_container = discord.ui.Container()
+        new_container.add_item(discord.ui.TextDisplay(f"### 🖼️ Level card của {self.target.display_name}"))
+        new_container.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem("attachment://level.png")))
+        self._replace_container(new_container)
+        await interaction.edit_original_response(view=self, attachments=[file])
 
-    @discord.ui.button(label="Rank", emoji="🏅", style=discord.ButtonStyle.secondary)
-    async def btn_rank(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        embed = await _build_rank_embed(self.target)
-        await interaction.edit_original_response(embed=embed, attachments=[], view=self)
+    async def _fill_rank(self, interaction: discord.Interaction):
+        new_container = await _build_rank_container(self.target)
+        self._replace_container(new_container)
+        await interaction.edit_original_response(view=self, attachments=[])
+
+    def _replace_container(self, new_container: discord.ui.Container) -> None:
+        """Đổ item của container mới vào container cũ tại chỗ (giữ đúng vị
+        trí trong LayoutView, phía trên hàng nút) thay vì gắn container mới
+        vào cuối view (sẽ làm nút bị đẩy lên trên nội dung)."""
+        self._container.clear_items()
+        for item in new_container.children:
+            self._container.add_item(item)
 
 
 @tree.command(name="profile", description="Xem hồ sơ, level card, rank, UUID và ngày tham gia của bạn (hoặc người khác)")
@@ -1226,9 +1272,10 @@ class ProfileView(discord.ui.View):
 async def profile_cmd(interaction: discord.Interaction, thanh_vien: discord.Member = None):
     target = thanh_vien or interaction.user
     await interaction.response.defer()
-    embed, file = await _build_profile_embed(target)
-    view = ProfileView(target=target, owner_id=interaction.user.id)
-    await interaction.followup.send(embed=embed, file=file, view=view)
+    view = ProfileLayoutView(target=target, owner_id=interaction.user.id)
+    container, file = await _build_profile_content(target)
+    view._replace_container(container)
+    await interaction.followup.send(view=view, file=file)
 
 
 @tree.command(name="level", description="Xem level (cấp độ) hiện tại của bạn hoặc người khác, kèm ảnh thẻ level")
@@ -1939,8 +1986,8 @@ class LeaderboardView(discord.ui.View):
             await interaction.response.send_message("Không tìm thấy thành viên này trong server.", ephemeral=True)
             return
 
-        embed, file = await _build_profile_embed(member)
-        await interaction.response.send_message(embed=embed, file=file, ephemeral=True)
+        container, file = await _build_profile_content(member)
+        await interaction.response.send_message(view=_SimpleContainerLayout(container), file=file, ephemeral=True)
 
     @discord.ui.button(label="Xem thêm", emoji="➕", style=discord.ButtonStyle.secondary)
     async def btn_more(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -2532,24 +2579,40 @@ _HELP_CATEGORIES = [
 ]
 
 
-def _build_help_category_embed(cat: dict) -> discord.Embed:
-    embed = discord.Embed(title=f"{cat['emoji']} {cat['label']}", color=discord.Color.blurple())
-    for name, desc in cat["commands"]:
-        embed.add_field(name=name, value=desc, inline=False)
-    return embed
+def _fill_help_container(container: discord.ui.Container, cat: dict | None) -> None:
+    """Đổ nội dung 1 nhóm lệnh (hoặc màn hình chào ban đầu nếu cat=None) vào
+    container có sẵn - dùng chung cho lúc khởi tạo lẫn khi bấm đổi nhóm,
+    tránh phải tạo/gắn lại Container mới (giữ đúng vị trí trong LayoutView)."""
+    container.clear_items()
+    if cat is None:
+        container.add_item(discord.ui.TextDisplay("# 📖 Trợ giúp"))
+        container.add_item(discord.ui.TextDisplay("Bấm nút bên dưới để xem lệnh theo từng nhóm."))
+    else:
+        container.add_item(discord.ui.TextDisplay(f"# {cat['emoji']} {cat['label']}"))
+        container.add_item(discord.ui.Separator(visible=True))
+        body = "\n\n".join(f"**{name}**\n{desc}" for name, desc in cat["commands"])
+        container.add_item(discord.ui.TextDisplay(body))
 
 
-class HelpView(discord.ui.View):
+class HelpLayoutView(discord.ui.LayoutView):
+    """Components V2 - có Separator thật, thay cho HelpView (embed) cũ."""
+
     def __init__(self):
         super().__init__(timeout=180)
+        self._container = discord.ui.Container()
+        _fill_help_container(self._container, None)
+        self.add_item(self._container)
+        row = discord.ui.ActionRow()
         for cat in _HELP_CATEGORIES:
-            self.add_item(self._make_button(cat))
+            row.add_item(self._make_button(cat))
+        self.add_item(row)
 
     def _make_button(self, cat: dict) -> discord.ui.Button:
         button = discord.ui.Button(label=cat["label"], emoji=cat["emoji"], style=discord.ButtonStyle.secondary)
 
         async def callback(interaction: discord.Interaction):
-            await interaction.response.edit_message(embed=_build_help_category_embed(cat), view=self)
+            _fill_help_container(self._container, cat)
+            await interaction.response.edit_message(view=self)
 
         button.callback = callback
         return button
@@ -2557,9 +2620,4 @@ class HelpView(discord.ui.View):
 
 @tree.command(name="help", description="Xem danh sách lệnh của bot theo từng nhóm")
 async def help_cmd(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="📖 Trợ giúp",
-        description="Bấm nút bên dưới để xem lệnh theo từng nhóm.",
-        color=discord.Color.blurple(),
-    )
-    await interaction.response.send_message(embed=embed, view=HelpView(), ephemeral=True)
+    await interaction.response.send_message(view=HelpLayoutView(), ephemeral=True)

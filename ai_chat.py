@@ -338,9 +338,10 @@ async def summarize_bot_update(
                 "⚡ **Lệnh mới**: chỉ liệt kê tên slash command mới xuất hiện trong diff, dạng `/tên-lệnh` "
                 "- chỉ liệt kê nếu diff có dòng kiểu @tree.command(name=\"...\") THẬT SỰ MỚI (không có "
                 "trong dòng '-' tương ứng), không suy đoán.\n\n"
-                "Mỗi mục 1-4 gạch đầu dòng ngắn gọn, tiếng Việt, không chào hỏi/lời dẫn thừa, vào thẳng "
-                "nội dung. Nếu diff quá kỹ thuật không đoán được ý nghĩa, chỉ cần nói 'cập nhật nội bộ "
-                "ở <tên file>', đừng cố suy diễn thêm."
+                "Mỗi mục TỐI ĐA 3 gạch đầu dòng, mỗi gạch đầu dòng TỐI ĐA 1 câu ngắn (dưới ~20 từ) - "
+                "PHẢI viết trọn câu, không được bỏ dở giữa chừng. Ngắn gọn, tiếng Việt, không chào hỏi/lời "
+                "dẫn thừa, vào thẳng nội dung. Nếu diff quá kỹ thuật không đoán được ý nghĩa, chỉ cần nói "
+                "'cập nhật nội bộ ở <tên file>', đừng cố suy diễn thêm."
             ),
         },
         {
@@ -352,7 +353,7 @@ async def summarize_bot_update(
             ),
         },
     ]
-    result = await _groq_chat(messages, max_tokens=700)
+    result = await _groq_chat(messages, max_tokens=1500)
     if result:
         return _sanitize_ai_output(result), True
 
