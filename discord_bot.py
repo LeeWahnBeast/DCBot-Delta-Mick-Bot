@@ -617,6 +617,25 @@ def _format_version(v: float) -> str:
     return s
 
 
+class _UpdateAnnouncementView(discord.ui.LayoutView):
+    """Components V2 (cần discord.py>=2.6) - dùng discord.ui.Separator, đường
+    kẻ ngang THẬT do Discord vẽ (visible=True), giống hệt bot nhạc/bot
+    "Vựa Sử Quan" trong ảnh mẫu - không còn là hack qua field embed nữa."""
+
+    def __init__(self, version: str, unix_ts: int, sections: list, footer_text: str):
+        super().__init__()
+        container = discord.ui.Container()
+        container.add_item(discord.ui.TextDisplay(f"# CẬP NHẬT {version}"))
+        container.add_item(discord.ui.TextDisplay(f"<t:{unix_ts}:f>"))
+        container.add_item(discord.ui.Separator(visible=True))
+        for name, bullets in sections:
+            body = f"**{name}**\n" + "\n".join(bullets) if bullets else f"**{name}**"
+            container.add_item(discord.ui.TextDisplay(body))
+        container.add_item(discord.ui.Separator(visible=True))
+        container.add_item(discord.ui.TextDisplay(f"-# {footer_text}"))
+        self.add_item(container)
+
+
 async def _announce_bot_update(old_version: float, bump_result: dict):
     """Sau khi version bump lúc khởi động (xem on_ready), nhờ AI tóm tắt cập
     nhật rồi đăng vào UPDATE_LOG_CHANNEL_ID. Chạy nền (fire-and-forget) để
@@ -635,9 +654,9 @@ async def _announce_bot_update(old_version: float, bump_result: dict):
     now = discord.utils.utcnow()
 
     # Gom các dòng "- ..." của AI thành bullet "• ..." theo TỪNG MỤC (mỗi
-    # dòng tiêu đề không có "-" đầu dòng, vd "🐛 **Bản vá**:" -> mở 1 field
-    # embed riêng, các dòng "-" theo sau -> nội dung field đó). Nếu AI không
-    # chia mục (vd rớt về bản liệt kê file) thì gom hết vào 1 field chung.
+    # dòng tiêu đề không có "-" đầu dòng, vd "🐛 **Bản vá**:" -> 1 khối text
+    # riêng, các dòng "-" theo sau -> nội dung khối đó). Nếu AI không chia
+    # mục (vd rớt về bản liệt kê file) thì gom hết vào 1 khối chung.
     sections: list[tuple[str, list[str]]] = []
     for raw in summary.splitlines():
         line = raw.strip()
@@ -653,24 +672,30 @@ async def _announce_bot_update(old_version: float, bump_result: dict):
             sections.append((line.rstrip(":") + ":", []))
     if not sections:
         sections = [("Cập nhật:", [f"• {summary.strip()}"])]
+    if not ai_ok:
+        sections.append((
+            "⚠️ Lưu ý:",
+            ["• AI chưa tóm tắt được (thiếu `GROQ_API_KEY` hoặc lỗi gọi Groq API) — danh sách trên chỉ là file đã đổi, không phải mô tả nội dung."],
+        ))
 
-    # <t:UNIX:f> -> Discord tự render kèm nền xám nổi bật + tự đổi theo giờ
-    # local của TỪNG người xem. Đường kẻ ngang giữa description và field là
-    # Discord TỰ VẼ khi embed có ít nhất 1 field - không cần "---" hay ký tự
-    # gì thêm, chỉ cần dùng embed.add_field() thay vì nhét hết vào description.
-    embed = discord.Embed(
-        title=f"CẬP NHẬT {_format_version(bump_result['version'])}",
-        description=f"<t:{int(now.timestamp())}:f>",
-    )
+    footer_text = f"{bump_result.get('changed_files', 0)} file thay đổi · v{old_version:.2f} → v{bump_result['version']:.2f}"
+    version_str = _format_version(bump_result["version"])
+    unix_ts = int(now.timestamp())
+
+    try:
+        view = _UpdateAnnouncementView(version_str, unix_ts, sections, footer_text)
+        await channel.send(view=view)
+        return
+    except AttributeError:
+        log.warning("discord.py phiên bản đang chạy chưa hỗ trợ Components V2 (cần >=2.6) - dùng embed fallback")
+    except Exception as e:
+        log.warning("Gửi Components V2 lỗi, dùng embed fallback: %s", e)
+
+    # Fallback: embed thường (cho discord.py cũ hơn 2.6 hoặc lỗi gửi Components V2)
+    embed = discord.Embed(title=f"CẬP NHẬT {version_str}", description=f"<t:{unix_ts}:f>")
     for name, bullets in sections:
         embed.add_field(name=name, value="\n".join(bullets) or "\u200b", inline=False)
-    if not ai_ok:
-        embed.add_field(
-            name="⚠️ Lưu ý",
-            value="AI chưa tóm tắt được (thiếu `GROQ_API_KEY` hoặc lỗi gọi Groq API) — danh sách trên chỉ là file đã đổi, không phải mô tả nội dung.",
-            inline=False,
-        )
-    embed.set_footer(text=f"{bump_result.get('changed_files', 0)} file thay đổi · v{old_version:.2f} → v{bump_result['version']:.2f}")
+    embed.set_footer(text=footer_text)
     await channel.send(embed=embed)
 
 
