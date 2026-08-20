@@ -626,40 +626,50 @@ async def _announce_bot_update(old_version: float, bump_result: dict):
         log.warning("Không tìm thấy kênh log cập nhật (id=%s)", UPDATE_LOG_CHANNEL_ID)
         return
 
-    summary = await ai_chat.summarize_bot_update(
+    summary, ai_ok = await ai_chat.summarize_bot_update(
         old_version=old_version,
         new_version=bump_result["version"],
         diffs=bump_result.get("diffs", {}),
         removed_paths=bump_result.get("removed_paths", []),
     )
     now = discord.utils.utcnow()
-    # Mỗi dòng "- ..." từ AI -> bullet "• ...", dòng tiêu đề mục (không có
-    # dấu "-" đầu dòng, vd "🐛 **Bản vá**:") giữ nguyên làm tiêu đề phụ.
-    bullet_lines = []
+
+    # Gom các dòng "- ..." của AI thành bullet "• ..." theo TỪNG MỤC (mỗi
+    # dòng tiêu đề không có "-" đầu dòng, vd "🐛 **Bản vá**:" -> mở 1 field
+    # embed riêng, các dòng "-" theo sau -> nội dung field đó). Nếu AI không
+    # chia mục (vd rớt về bản liệt kê file) thì gom hết vào 1 field chung.
+    sections: list[tuple[str, list[str]]] = []
     for raw in summary.splitlines():
         line = raw.strip()
         if not line:
             continue
         if line.startswith("-"):
-            bullet_lines.append(f"• {line.lstrip('- ').strip()}")
+            bullet = f"• {line.lstrip('- ').strip()}"
+            if sections:
+                sections[-1][1].append(bullet)
+            else:
+                sections.append(("Cập nhật:", [bullet]))
         else:
-            bullet_lines.append(line)
-    bullets = "\n".join(bullet_lines) if bullet_lines else f"• {summary.strip()}"
+            sections.append((line.rstrip(":") + ":", []))
+    if not sections:
+        sections = [("Cập nhật:", [f"• {summary.strip()}"])]
 
     # <t:UNIX:f> -> Discord tự render kèm nền xám nổi bật + tự đổi theo giờ
-    # local của TỪNG người xem (không cần tự format tiếng Việt tay).
-    # Discord KHÔNG hỗ trợ markdown "---" (chỉ hiện đúng 3 dấu gạch ngang
-    # dạng chữ, xác nhận qua thực tế lẫn tài liệu). Cách duy nhất để có 1
-    # đường kẻ ngang thật là lặp lại ký tự vẽ khung Unicode "─" (U+2500,
-    # không phải dấu gạch ngang "-" thường) liền nhau - loại ký tự này được
-    # thiết kế để nối liền mí với nhau nên nhìn như 1 đường thẳng liên tục.
-    divider = "─" * 34
-    description = f"<t:{int(now.timestamp())}:f>\n{divider}\n\n{bullets}"
-
+    # local của TỪNG người xem. Đường kẻ ngang giữa description và field là
+    # Discord TỰ VẼ khi embed có ít nhất 1 field - không cần "---" hay ký tự
+    # gì thêm, chỉ cần dùng embed.add_field() thay vì nhét hết vào description.
     embed = discord.Embed(
         title=f"CẬP NHẬT {_format_version(bump_result['version'])}",
-        description=description,
+        description=f"<t:{int(now.timestamp())}:f>",
     )
+    for name, bullets in sections:
+        embed.add_field(name=name, value="\n".join(bullets) or "\u200b", inline=False)
+    if not ai_ok:
+        embed.add_field(
+            name="⚠️ Lưu ý",
+            value="AI chưa tóm tắt được (thiếu `GROQ_API_KEY` hoặc lỗi gọi Groq API) — danh sách trên chỉ là file đã đổi, không phải mô tả nội dung.",
+            inline=False,
+        )
     embed.set_footer(text=f"{bump_result.get('changed_files', 0)} file thay đổi · v{old_version:.2f} → v{bump_result['version']:.2f}")
     await channel.send(embed=embed)
 
@@ -2344,10 +2354,24 @@ async def tudien_cmd(interaction: discord.Interaction):
 @discord.app_commands.describe(noi_dung="Bạn muốn nói gì với bot?")
 async def ai_cmd(interaction: discord.Interaction, noi_dung: str):
     await interaction.response.defer()
-    reply_text = await ai_chat._groq_chat([
+    messages = [
         {"role": "system", "content": ai_chat.SYSTEM_PROMPT},
         {"role": "user", "content": noi_dung},
-    ])
+    ]
+
+    if ai_chat.needs_web_search(noi_dung):
+        status_msg = await interaction.followup.send("-# 🔎 đang tìm kiếm trên mạng...", wait=True)
+        result, ok = await ai_chat.search_answer(ai_chat.SYSTEM_PROMPT, noi_dung)
+        if ok and result:
+            final_text = ai_chat._sanitize_ai_output(result)
+            if len(final_text) > 2000:
+                final_text = final_text[:1990] + "…"
+        else:
+            final_text = "-# ⚠️ tìm kiếm lỗi\nSorry, hiện mình tìm kiếm không được (hết quota hoặc lỗi Gemini), thử hỏi lại sau nha 🙏"
+        await status_msg.edit(content=final_text)
+        return
+
+    reply_text = await ai_chat._groq_chat(messages)
     if reply_text:
         await interaction.followup.send(
             ai_chat._sanitize_ai_output(reply_text), allowed_mentions=discord.AllowedMentions.none()

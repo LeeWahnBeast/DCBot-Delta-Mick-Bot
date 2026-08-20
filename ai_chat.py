@@ -29,12 +29,15 @@ import db
 from config import (
     GROQ_API_KEY,
     GROQ_MODEL,
+    GEMINI_API_KEY,
+    GEMINI_MODEL,
     AI_LEARN_MIN_WORD_LEN,
     AI_LEARN_MIN_MEMBERS,
     log,
 )
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 SYSTEM_PROMPT = (
     "Bạn là Mick, một con bot Discord gen Z, hài hước, nói chuyện tự nhiên bằng "
@@ -148,17 +151,125 @@ async def _groq_chat(messages: list[dict]) -> str | None:
         return None
 
 
+# Từ khoá gợi ý câu hỏi cần thông tin THỜI SỰ/THỰC TẾ (giá cả, tin tức, thời
+# tiết, "hôm nay/hiện tại/mới nhất"...) - CHỈ khi khớp mới bật Gemini có tool
+# search (search_answer), vì tool này tốn quota + độ trễ hơn hẳn Groq chat
+# thường nên không bật tràn lan cho mọi tin nhắn.
+_SEARCH_TRIGGER_RE = re.compile(
+    r"(hôm nay|bây giờ|hiện tại|hiện nay|mới nhất|gần đây|vừa qua|vừa rồi|"
+    r"tin tức|thời sự|giá (?:vàng|xăng|đô|usd|bitcoin|coin)|tỷ giá|"
+    r"kết quả (?:trận|xổ số|bóng đá)|xổ số|thời tiết|dự báo|tỷ số|vô địch|"
+    r"khi nào|bao nhiêu tuổi|năm nay|202[4-9]|phiên bản mới|update mới)",
+    re.IGNORECASE,
+)
+
+
+def needs_web_search(text: str) -> bool:
+    """True nếu câu hỏi có vẻ cần thông tin thực tế/thời sự -> nên bật
+    search_answer (Gemini + tool tìm web) thay vì model chat thường."""
+    return bool(_SEARCH_TRIGGER_RE.search(text or ""))
+
+
+async def search_answer(system_prompt: str, user_text: str) -> tuple[str | None, bool]:
+    """Gọi Gemini với tool "google_search" tích hợp sẵn (Gemini tự quyết
+    định có cần search hay không tuỳ câu hỏi). Trả về (nội dung, ok) -
+    ok=False khi thiếu GEMINI_API_KEY, hết quota (429), hoặc lỗi gọi API -
+    nơi gọi (xem _reply_with_search) sẽ báo lỗi rõ cho user thay vì âm thầm
+    im lặng khi ok=False."""
+    if not GEMINI_API_KEY:
+        log.warning("search_answer: thiếu GEMINI_API_KEY")
+        return None, False
+    url = f"{GEMINI_URL.format(model=GEMINI_MODEL)}?key={GEMINI_API_KEY}"
+    payload = {
+        "system_instruction": {"parts": [{"text": system_prompt}]},
+        "contents": [{"role": "user", "parts": [{"text": user_text}]}],
+        "tools": [{"google_search": {}}],
+        "generationConfig": {"temperature": 0.8, "maxOutputTokens": 800},
+    }
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, json=payload, timeout=45) as resp:
+                if resp.status == 429:
+                    log.warning("search_answer: Gemini hết quota (429)")
+                    return None, False
+                if resp.status != 200:
+                    body = await resp.text()
+                    log.warning("Gemini API lỗi %s: %s", resp.status, body[:300])
+                    return None, False
+                data = await resp.json()
+                candidates = data.get("candidates") or []
+                if not candidates:
+                    log.warning("Gemini API không trả candidate nào (có thể bị chặn safety filter)")
+                    return None, False
+                parts = candidates[0].get("content", {}).get("parts", [])
+                text = "".join(p.get("text", "") for p in parts).strip()
+                return (text or None), bool(text)
+    except Exception as e:
+        log.warning("Gọi Gemini lỗi: %s", e)
+        return None, False
+
+
 async def reply_to_message(message: discord.Message) -> str | None:
-    """Trả lời 1 tin nhắn của user (do reply hoặc tag bot)."""
+    """Trả lời 1 tin nhắn của user (do reply hoặc tag bot). Nếu câu hỏi có vẻ
+    cần thông tin thời sự (xem needs_web_search) thì tự xử lý gửi + sửa tin
+    nhắn luôn (trả về None để _handle_ai_reply không gửi thêm lần nữa)."""
     context = await _build_slang_context()
-    messages = [{"role": "system", "content": SYSTEM_PROMPT + context}]
-    messages.append({"role": "user", "content": message.content})
+    system_prompt = SYSTEM_PROMPT + context
+
+    if needs_web_search(message.content):
+        await _reply_with_search(message, system_prompt, message.content)
+        return None
+
+    messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": message.content}]
     result = await _groq_chat(messages)
     return _sanitize_ai_output(result) if result else result
 
 
+async def _reply_with_search(message: discord.Message, system_prompt: str, user_text: str) -> None:
+    status_msg = None
+    try:
+        status_msg = await message.reply(
+            "-# 🔎 đang tìm kiếm trên mạng...", mention_author=False, allowed_mentions=discord.AllowedMentions.none()
+        )
+    except Exception as e:
+        log.warning("Gửi thông báo đang tìm kiếm lỗi: %s", e)
+
+    result, ok = await search_answer(system_prompt, user_text)
+    if ok and result:
+        final_text = _sanitize_ai_output(result)
+        if len(final_text) > 2000:
+            final_text = final_text[:1990] + "…"
+    else:
+        final_text = "-# ⚠️ tìm kiếm lỗi\nSorry, hiện mình tìm kiếm không được (hết quota hoặc lỗi Gemini), thử hỏi lại sau nha 🙏"
+
+    if status_msg is not None:
+        try:
+            await status_msg.edit(content=final_text)
+            return
+        except Exception as e:
+            log.warning("Sửa tin nhắn tìm kiếm lỗi: %s", e)
+    try:
+        await message.reply(final_text, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+    except Exception:
+        pass
+
+
 async def generate_auto_message() -> str | None:
-    """Sinh 1 câu bot tự chat vào kênh, không cần user hỏi."""
+    """Sinh 1 câu bot tự chat vào kênh, không cần user hỏi. Khoảng 35% số lần
+    sẽ nhờ Gemini tìm 1 tin/sự kiện thời sự thật để mở lời cho có tính "đọc
+    tin" thay vì chỉ bịa chuyện phiếm; nếu Gemini lỗi/hết quota thì ÂM THẦM
+    rớt về câu bịa bình thường (auto-chat không cần báo lỗi cho ai thấy)."""
+    if random.random() < 0.35:
+        result, ok = await search_answer(
+            SYSTEM_PROMPT,
+            "Tìm 1 tin tức/sự kiện đang hot, thú vị, không nhạy cảm (không chính trị "
+            "gây tranh cãi, không bạo lực, không tin giả) hôm nay, rồi viết 1 câu ngắn "
+            "mở lời bắt chuyện với server về tin đó, kiểu tự nhiên như bạn bè kể chuyện "
+            "phiếm, không dẫn nguồn/link/markdown.",
+        )
+        if ok and result:
+            return _sanitize_ai_output(result)
+
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {
@@ -185,11 +296,14 @@ _DIFF_BLOCK_MAX_CHARS = 6000  # chặn prompt phình quá to nếu đổi nhiề
 
 async def summarize_bot_update(
     old_version: float, new_version: float, diffs: dict[str, str], removed_paths: list[str]
-) -> str:
+) -> tuple[str, bool]:
     """Nhờ AI viết 1 đoạn changelog ngắn dựa trên DIFF NỘI DUNG THẬT (dòng
     thêm/xoá thật sự, không phải đoán theo tên file như trước) để tránh AI
     bịa/nói tùm xàm những tính năng không có thật. Nếu không gọi được Groq
-    (thiếu API key, lỗi mạng...) thì tự rớt về 1 bản liệt kê file thuần."""
+    (thiếu API key, lỗi mạng...) thì tự rớt về 1 bản liệt kê file thuần.
+    Trả về (nội dung, ai_ok) - ai_ok=False khi phải rớt về bản liệt kê file
+    thuần, để nơi gọi (xem discord_bot._announce_bot_update) biết mà báo rõ
+    cho admin thay vì âm thầm đăng 1 changelog trống-ý-nghĩa."""
     if diffs:
         parts = []
         for path, diff_text in diffs.items():
@@ -233,14 +347,17 @@ async def summarize_bot_update(
     ]
     result = await _groq_chat(messages)
     if result:
-        return _sanitize_ai_output(result)
+        return _sanitize_ai_output(result), True
+
+    reason = "thiếu GROQ_API_KEY" if not GROQ_API_KEY else "lỗi gọi Groq API (xem log Render)"
+    log.warning("summarize_bot_update: rớt về bản liệt kê file thuần (%s)", reason)
 
     lines = ["📦 File thay đổi:"]
     lines += [f"- `{p}`" for p in list(diffs.keys())[:15]]
     if removed_paths:
         lines.append("File bị xoá:")
         lines += [f"- `{p}`" for p in removed_paths[:10]]
-    return "\n".join(lines)
+    return "\n".join(lines), False
 
 
 # ---------------------------------------------------------------------------

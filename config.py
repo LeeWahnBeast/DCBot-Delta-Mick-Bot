@@ -175,6 +175,11 @@ QUEST_INVITE_MAX = int(os.environ.get("QUEST_INVITE_MAX", "10"))
 # --- AI Chat (Groq) ---
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
+# Gemini dùng riêng cho các câu cần tìm kiếm web thật (xem ai_chat.search_answer,
+# tool "google_search" tích hợp sẵn của Gemini) - Groq không có tool search
+# đủ ổn định/miễn phí bằng nên tách hẳn ra provider khác cho phần này.
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 AI_AUTO_CHAT_INTERVAL_SEC = int(os.environ.get("AI_AUTO_CHAT_INTERVAL_SEC", str(15 * 60)))
 # Chỉ tự nhắn nếu có người thật (không phải bot) chat trong kênh trong khoảng thời gian này
 AI_AUTO_CHAT_REQUIRE_ACTIVITY_SEC = int(os.environ.get("AI_AUTO_CHAT_REQUIRE_ACTIVITY_SEC", str(60 * 60)))
