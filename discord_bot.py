@@ -120,8 +120,10 @@ async def on_ready():
     if not _version_checked:
         _version_checked = True
         try:
-            old_version = _bot_version
             result = await versioning.check_and_bump_version()
+            old_version = result["old_version"]  # đọc từ DB thật, KHÔNG dùng _bot_version
+            # (biến RAM này bị reset về 1.0 mỗi lần bot restart nên trước đây
+            # luôn báo sai kiểu "1.00 -> 2.11" dù bot đã ở version 2.11 từ trước).
             _bot_version = result["version"]
             if result.get("bumped"):
                 _fire_and_forget(
@@ -623,6 +625,7 @@ async def _announce_bot_update(old_version: float, bump_result: dict):
         title=f"🔄 Bot vừa cập nhật · v{old_version:.2f} → v{bump_result['version']:.2f}",
         description=summary,
         color=discord.Color.blurple(),
+        timestamp=discord.utils.utcnow(),
     )
     embed.set_footer(text=f"{bump_result.get('changed_files', 0)} file thay đổi")
     await channel.send(embed=embed)

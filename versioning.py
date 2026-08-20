@@ -156,10 +156,10 @@ async def check_and_bump_version(root: str = ".") -> dict:
             "version_file_hashes": new_hashes_escaped,
             "version_updated_at": int(time.time()),
         })
-        return {"version": old_version, "bumped": False, "changed_files": 0}
+        return {"version": old_version, "old_version": old_version, "bumped": False, "changed_files": 0}
 
     if changed_count == 0:
-        return {"version": old_version, "bumped": False, "changed_files": 0}
+        return {"version": old_version, "old_version": old_version, "bumped": False, "changed_files": 0}
 
     bump = _bump_amount(changed_count)
     new_version = round(old_version + bump, 2)
@@ -179,6 +179,7 @@ async def check_and_bump_version(root: str = ".") -> dict:
     )
     return {
         "version": new_version,
+        "old_version": old_version,
         "bumped": True,
         "changed_files": changed_count,
         "changed_paths": changed,

@@ -208,12 +208,18 @@ async def summarize_bot_update(
                 "Bạn là trợ lý viết changelog cho 1 bot Discord tên Mick Bot. Bạn sẽ được đưa "
                 "DIFF NỘI DUNG THẬT của các file mã nguồn Python vừa thay đổi: mỗi dòng bắt đầu "
                 "bằng '+' là dòng MỚI THÊM, bắt đầu bằng '-' là dòng BỊ XOÁ. "
-                "CHỈ được viết changelog dựa trên những gì THẬT SỰ xuất hiện trong diff (tên lệnh/"
-                "hàm/biến/chuỗi text mới thấy được) - TUYỆT ĐỐI KHÔNG suy diễn, đoán mò hay bịa ra "
-                "tính năng không có trong diff. Nếu 1 file có diff quá kỹ thuật/khó hiểu ý nghĩa, chỉ "
-                "cần nói ngắn gọn 'cập nhật nội bộ ở <tên file>', đừng cố suy diễn thêm. "
-                "Viết 3-6 dòng, tiếng Việt, dùng gạch đầu dòng. Không chào hỏi, không lời dẫn thừa, "
-                "vào thẳng nội dung changelog."
+                "CHỈ được viết dựa trên những gì THẬT SỰ xuất hiện trong diff (tên lệnh/hàm/biến/"
+                "chuỗi text mới thấy được) - TUYỆT ĐỐI KHÔNG suy diễn, đoán mò hay bịa ra tính năng "
+                "không có trong diff.\n\n"
+                "Trình bày theo ĐÚNG 3 mục sau (bỏ mục nào không có gì để nói, không viết mục rỗng):\n"
+                "🐛 **Bản vá**: lỗi/bug được sửa (nếu thấy trong diff có dòng code sửa logic lỗi cũ)\n"
+                "✨ **Tính năng mới**: hệ thống/cơ chế mới được thêm (không phải lệnh)\n"
+                "⚡ **Lệnh mới**: chỉ liệt kê tên slash command mới xuất hiện trong diff, dạng `/tên-lệnh` "
+                "- chỉ liệt kê nếu diff có dòng kiểu @tree.command(name=\"...\") THẬT SỰ MỚI (không có "
+                "trong dòng '-' tương ứng), không suy đoán.\n\n"
+                "Mỗi mục 1-4 gạch đầu dòng ngắn gọn, tiếng Việt, không chào hỏi/lời dẫn thừa, vào thẳng "
+                "nội dung. Nếu diff quá kỹ thuật không đoán được ý nghĩa, chỉ cần nói 'cập nhật nội bộ "
+                "ở <tên file>', đừng cố suy diễn thêm."
             ),
         },
         {
@@ -229,7 +235,7 @@ async def summarize_bot_update(
     if result:
         return _sanitize_ai_output(result)
 
-    lines = [f"📦 Cập nhật version **{old_version:.2f} → {new_version:.2f}**", "File thay đổi:"]
+    lines = ["📦 File thay đổi:"]
     lines += [f"- `{p}`" for p in list(diffs.keys())[:15]]
     if removed_paths:
         lines.append("File bị xoá:")
