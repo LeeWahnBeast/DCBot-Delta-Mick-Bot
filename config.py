@@ -180,6 +180,11 @@ GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
 # đủ ổn định/miễn phí bằng nên tách hẳn ra provider khác cho phần này.
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
+
+# Fallback tìm kiếm web khi Gemini lỗi/hết quota (429...) - dùng Tavily lấy
+# kết quả search rồi nhờ Groq tóm tắt lại. Free tier Tavily: ~1000 credit/tháng.
+# Lấy key tại https://app.tavily.com
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 AI_AUTO_CHAT_INTERVAL_SEC = int(os.environ.get("AI_AUTO_CHAT_INTERVAL_SEC", str(15 * 60)))
 # Chỉ tự nhắn nếu có người thật (không phải bot) chat trong kênh trong khoảng thời gian này
 AI_AUTO_CHAT_REQUIRE_ACTIVITY_SEC = int(os.environ.get("AI_AUTO_CHAT_REQUIRE_ACTIVITY_SEC", str(60 * 60)))

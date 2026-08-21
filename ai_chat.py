@@ -31,6 +31,7 @@ from config import (
     GROQ_MODEL,
     GEMINI_API_KEY,
     GEMINI_MODEL,
+    TAVILY_API_KEY,
     AI_LEARN_MIN_WORD_LEN,
     AI_LEARN_MIN_MEMBERS,
     log,
@@ -38,6 +39,7 @@ from config import (
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+TAVILY_URL = "https://api.tavily.com/search"
 
 SYSTEM_PROMPT = (
     "Bạn là Mick, một con bot Discord gen Z, hài hước, nói chuyện tự nhiên bằng "
@@ -217,6 +219,57 @@ async def search_answer(system_prompt: str, user_text: str) -> tuple[str | None,
         return None, False, f"lỗi mạng/timeout: {e}"
 
 
+async def _tavily_search_answer(system_prompt: str, user_text: str) -> tuple[str | None, bool, str]:
+    """Fallback khi Gemini lỗi/hết quota: lấy kết quả tìm kiếm từ Tavily rồi
+    nhờ Groq tóm tắt lại thành câu trả lời tự nhiên. Trả về cùng định dạng
+    (nội dung, ok, lý_do) như search_answer() để _reply_with_search dùng chung."""
+    if not TAVILY_API_KEY:
+        return None, False, "thiếu TAVILY_API_KEY"
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            payload = {
+                "api_key": TAVILY_API_KEY,
+                "query": user_text,
+                "search_depth": "basic",
+                "include_answer": True,
+                "max_results": 5,
+            }
+            async with session.post(TAVILY_URL, json=payload, timeout=20) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    log.warning("Tavily API lỗi %s: %s", resp.status, body[:300])
+                    return None, False, f"tavily_http_{resp.status}: {body[:150]}"
+                data = await resp.json()
+    except Exception as e:
+        log.warning("Gọi Tavily lỗi: %s", e)
+        return None, False, f"tavily lỗi mạng/timeout: {e}"
+
+    tavily_answer = (data.get("answer") or "").strip()
+    results = data.get("results") or []
+    if not tavily_answer and not results:
+        return None, False, "tavily không trả kết quả nào"
+
+    sources_text = "\n".join(
+        f"- {r.get('title', '')}: {r.get('content', '')[:300]}" for r in results[:5]
+    )
+    groq_prompt = (
+        f"{system_prompt}\n\n"
+        "Dưới đây là kết quả tìm kiếm web mới nhất cho câu hỏi của user. "
+        "Dựa vào đó, trả lời tự nhiên bằng giọng của bạn (đừng liệt kê nguồn thô, "
+        "đừng nói 'theo kết quả tìm kiếm'):\n\n"
+        f"Tóm tắt nhanh: {tavily_answer}\n\nChi tiết:\n{sources_text}"
+    )
+    messages = [
+        {"role": "system", "content": groq_prompt},
+        {"role": "user", "content": user_text},
+    ]
+    result = await _groq_chat(messages, max_tokens=800)
+    if not result:
+        return None, False, "tavily ok nhưng Groq tóm tắt thất bại (thiếu GROQ_API_KEY hoặc lỗi Groq)"
+    return result, True, ""
+
+
 async def reply_to_message(message: discord.Message) -> str | None:
     """Trả lời 1 tin nhắn của user (do reply hoặc tag bot). Nếu câu hỏi có vẻ
     cần thông tin thời sự (xem needs_web_search) thì tự xử lý gửi + sửa tin
@@ -243,6 +296,15 @@ async def _reply_with_search(message: discord.Message, system_prompt: str, user_
         log.warning("Gửi thông báo đang tìm kiếm lỗi: %s", e)
 
     result, ok, reason = await search_answer(system_prompt, user_text)
+    if not ok:
+        log.warning("_reply_with_search: search_answer (Gemini) thất bại (%s) - thử fallback Tavily", reason)
+        fallback_result, fallback_ok, fallback_reason = await _tavily_search_answer(system_prompt, user_text)
+        if fallback_ok:
+            result, ok, reason = fallback_result, True, ""
+        else:
+            log.warning("_reply_with_search: fallback Tavily cũng thất bại (%s)", fallback_reason)
+            reason = f"{reason} | fallback Tavily: {fallback_reason}"
+
     if ok and result:
         final_text = _sanitize_ai_output(result)
         if len(final_text) > 2000:

@@ -250,29 +250,27 @@ async def _handle_live_status(profile: dict, channel):
         if channel is not None:
             live_url = f"https://www.tiktok.com/@{TIKTOK_USERNAME}/live"
             now_ts = int(time.time())
-            embed = discord.Embed(
-                title=f"🔴 {profile['nickname']} đang LIVESTREAM trên TikTok!",
-                url=live_url,
-                description=live_url,
-                color=discord.Color.red(),
-                timestamp=datetime.now(timezone.utc),
+            header_text = discord.ui.TextDisplay(
+                f"### 🔴 {profile['nickname']} đang LIVESTREAM trên TikTok!\n{live_url}"
             )
-            embed.add_field(
-                name="📥 Bot phát hiện lúc",
-                value=(
+            container = discord.ui.Container(accent_color=discord.Color.red())
+            if profile.get("avatar_url"):
+                container.add_item(discord.ui.Section(header_text, accessory=discord.ui.Thumbnail(profile["avatar_url"])))
+            else:
+                container.add_item(header_text)
+            container.add_item(
+                discord.ui.TextDisplay(
+                    f"**📥 Bot phát hiện lúc**\n"
                     f"<t:{now_ts}:F> (<t:{now_ts}:R>)\n"
                     f"⚠️ TikTok không cho biết chính xác giờ bắt đầu live, nên "
                     f"buổi live có thể đã bắt đầu tới ~{_format_delay(CHECK_INTERVAL_SEC)} "
                     f"trước đó (chu kỳ bot kiểm tra)."
-                ),
-                inline=False,
+                )
             )
-            if profile.get("avatar_url"):
-                embed.set_thumbnail(url=profile["avatar_url"])
             try:
                 await channel.send(
                     content=f"{_mention_prefix()}🔴 @{TIKTOK_USERNAME} đang livestream, vào xem ngay!",
-                    embed=embed,
+                    view=features.SimpleContainerLayout(container),
                 )
             except Exception as e:
                 log.warning("Gửi thông báo live lỗi: %s", e)
@@ -1294,9 +1292,9 @@ async def level_cmd(interaction: discord.Interaction, thanh_vien: discord.Member
         rank=rank,
     )
     file = discord.File(buf, filename="level.png")
-    embed = discord.Embed(color=discord.Color.blurple())
-    embed.set_image(url="attachment://level.png")
-    await interaction.followup.send(embed=embed, file=file)
+    container = discord.ui.Container(accent_color=discord.Color.blurple())
+    container.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem("attachment://level.png")))
+    await interaction.followup.send(view=features.SimpleContainerLayout(container), file=file)
 
 
 # ---------------------------------------------------------------------------
@@ -1327,12 +1325,56 @@ class WordleGuessModal(discord.ui.Modal, title="Đoán từ Wordle"):
             await interaction.response.send_message("❌ Ván này đã kết thúc hoặc không tồn tại!", ephemeral=True)
             return
 
-        embed, finished = result
-        view = None if finished else WordleView(self.game_id, self.owner_id)
-        await _append_ticket_footer(embed, self.owner_id)
-        await interaction.response.edit_message(embed=embed, view=view)
+        container, finished = result
+        await _append_ticket_footer(container, self.owner_id)
         if finished:
+            layout = GameLayoutView(timeout=1)
+            layout._set_container(container)
+            await interaction.response.edit_message(view=layout)
             await _finish_minigame(interaction, self.owner_id)
+        else:
+            view = WordleView(self.game_id, self.owner_id)
+            view._set_container(container)
+            await interaction.response.edit_message(view=view)
+
+
+class GameLayoutView(discord.ui.LayoutView):
+    """LayoutView (Components V2) cơ sở dùng chung cho mọi minigame: 1
+    Container hiện nội dung ván + 1 hoặc nhiều ActionRow chứa nút bấm, thay
+    cho discord.ui.View + embed kiểu cũ."""
+
+    def __init__(self, timeout: float | None):
+        super().__init__(timeout=timeout)
+        self._container = discord.ui.Container()
+        self.add_item(self._container)
+        self._action_rows: list[discord.ui.ActionRow] = []
+        self._buttons: list[discord.ui.Button] = []
+
+    def _set_container(self, new_container: discord.ui.Container) -> None:
+        self._container.clear_items()
+        for item in new_container.children:
+            self._container.add_item(item)
+
+    def _set_text(self, text: str) -> None:
+        """Thay nội dung Container bằng 1 dòng text đơn giản (vd thông báo dừng ván)."""
+        self._container.clear_items()
+        self._container.add_item(discord.ui.TextDisplay(text))
+
+    def _add_button(self, button: discord.ui.Button, row: int = 0) -> discord.ui.Button:
+        while len(self._action_rows) <= row:
+            new_row = discord.ui.ActionRow()
+            self._action_rows.append(new_row)
+            self.add_item(new_row)
+        self._action_rows[row].add_item(button)
+        self._buttons.append(button)
+        return button
+
+    def _disable_all_buttons(self) -> None:
+        for b in self._buttons:
+            b.disabled = True
+
+    async def on_timeout(self):
+        self._disable_all_buttons()
 
 
 class StopGameButton(discord.ui.Button):
@@ -1353,23 +1395,25 @@ class StopGameButton(discord.ui.Button):
             )
             return
 
-        view: discord.ui.View = self.view
-        for child in view.children:
-            child.disabled = True
-        view.stop()
-
+        view: GameLayoutView = self.view
         text = f"🛑 Ván #{self.game_id} đã bị dừng."
         if refunded is not None:
             text += f" Đã hoàn lại tiền cược, số dư hiện tại: **{refunded} MICK**."
-        await interaction.response.edit_message(content=text, view=view)
+        view._disable_all_buttons()
+        view._set_text(text)
+        view.stop()
+        await interaction.response.edit_message(view=view)
 
 
-class WordleView(discord.ui.View):
+class WordleView(GameLayoutView):
     def __init__(self, game_id: str, owner_id: int):
         super().__init__(timeout=300)
         self.game_id = game_id
         self.owner_id = owner_id
-        self.add_item(StopGameButton(game_id, owner_id))
+        button = discord.ui.Button(label="Nhập từ", emoji="⌨️", style=discord.ButtonStyle.primary)
+        button.callback = self._btn_input
+        self._add_button(button)
+        self._add_button(StopGameButton(game_id, owner_id))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
@@ -1380,13 +1424,8 @@ class WordleView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Nhập từ", emoji="⌨️", style=discord.ButtonStyle.primary)
-    async def btn_input(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _btn_input(self, interaction: discord.Interaction):
         await interaction.response.send_modal(WordleGuessModal(self.game_id, self.owner_id))
-
-    async def on_timeout(self):
-        for child in self.children:
-            child.disabled = True
 
 
 class GuessNumberModal(discord.ui.Modal, title="Đoán số"):
@@ -1412,20 +1451,28 @@ class GuessNumberModal(discord.ui.Modal, title="Đoán số"):
             await interaction.response.send_message("❌ Ván này đã kết thúc hoặc không tồn tại!", ephemeral=True)
             return
 
-        embed, finished = result
-        view = None if finished else GuessNumberView(self.game_id, self.owner_id)
-        await _append_ticket_footer(embed, self.owner_id)
-        await interaction.response.edit_message(embed=embed, view=view)
+        container, finished = result
+        await _append_ticket_footer(container, self.owner_id)
         if finished:
+            layout = GameLayoutView(timeout=1)
+            layout._set_container(container)
+            await interaction.response.edit_message(view=layout)
             await _finish_minigame(interaction, self.owner_id)
+        else:
+            view = GuessNumberView(self.game_id, self.owner_id)
+            view._set_container(container)
+            await interaction.response.edit_message(view=view)
 
 
-class GuessNumberView(discord.ui.View):
+class GuessNumberView(GameLayoutView):
     def __init__(self, game_id: str, owner_id: int):
         super().__init__(timeout=300)
         self.game_id = game_id
         self.owner_id = owner_id
-        self.add_item(StopGameButton(game_id, owner_id))
+        button = discord.ui.Button(label="Nhập số", emoji="🔢", style=discord.ButtonStyle.primary)
+        button.callback = self._btn_input
+        self._add_button(button)
+        self._add_button(StopGameButton(game_id, owner_id))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
@@ -1435,147 +1482,132 @@ class GuessNumberView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Nhập số", emoji="🔢", style=discord.ButtonStyle.primary)
-    async def btn_input(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _btn_input(self, interaction: discord.Interaction):
         await interaction.response.send_modal(GuessNumberModal(self.game_id, self.owner_id))
 
-    async def on_timeout(self):
-        for child in self.children:
-            child.disabled = True
 
-
-class RPSView(discord.ui.View):
+class RPSView(GameLayoutView):
     def __init__(self, game_id: str, owner_id: int):
         super().__init__(timeout=60)
         self.game_id = game_id
         self.owner_id = owner_id
-        self.add_item(StopGameButton(game_id, owner_id))
+        for label, emoji, choice in (("Kéo", "✂️", "keo"), ("Búa", "🪨", "bua"), ("Bao", "📄", "bao")):
+            button = discord.ui.Button(label=label, emoji=emoji, style=discord.ButtonStyle.secondary)
+            button.callback = self._make_callback(choice)
+            self._add_button(button)
+        self._add_button(StopGameButton(game_id, owner_id))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
             await interaction.response.send_message("Đây không phải ván của bạn!", ephemeral=True)
             return False
         return True
+
+    def _make_callback(self, choice: str):
+        async def callback(interaction: discord.Interaction):
+            await self._play(interaction, choice)
+        return callback
 
     async def _play(self, interaction: discord.Interaction, choice: str):
-        embed = await features.process_rps(self.game_id, choice)
-        if embed is None:
+        container = await features.process_rps(self.game_id, choice)
+        if container is None:
             await interaction.response.send_message("❌ Ván này đã kết thúc hoặc không tồn tại!", ephemeral=True)
             return
-        for child in self.children:
-            child.disabled = True
-        await _append_ticket_footer(embed, self.owner_id)
-        await interaction.response.edit_message(embed=embed, view=self)
+        self._disable_all_buttons()
+        await _append_ticket_footer(container, self.owner_id)
+        self._set_container(container)
+        await interaction.response.edit_message(view=self)
         await _finish_minigame(interaction, self.owner_id)
         self.stop()
 
-    @discord.ui.button(label="Kéo", emoji="✂️", style=discord.ButtonStyle.secondary)
-    async def btn_keo(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._play(interaction, "keo")
 
-    @discord.ui.button(label="Búa", emoji="🪨", style=discord.ButtonStyle.secondary)
-    async def btn_bua(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._play(interaction, "bua")
-
-    @discord.ui.button(label="Bao", emoji="📄", style=discord.ButtonStyle.secondary)
-    async def btn_bao(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._play(interaction, "bao")
-
-    async def on_timeout(self):
-        for child in self.children:
-            child.disabled = True
-
-
-class ChanLeView(discord.ui.View):
+class ChanLeView(GameLayoutView):
     def __init__(self, game_id: str, owner_id: int):
         super().__init__(timeout=60)
         self.game_id = game_id
         self.owner_id = owner_id
-        self.add_item(StopGameButton(game_id, owner_id))
+        for label, emoji, style, choice in (
+            ("Chẵn", "🔵", discord.ButtonStyle.primary, "chan"),
+            ("Lẻ", "🟠", discord.ButtonStyle.secondary, "le"),
+        ):
+            button = discord.ui.Button(label=label, emoji=emoji, style=style)
+            button.callback = self._make_callback(choice)
+            self._add_button(button)
+        self._add_button(StopGameButton(game_id, owner_id))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
             await interaction.response.send_message("Đây không phải ván của bạn!", ephemeral=True)
             return False
         return True
+
+    def _make_callback(self, choice: str):
+        async def callback(interaction: discord.Interaction):
+            await self._play(interaction, choice)
+        return callback
 
     async def _play(self, interaction: discord.Interaction, choice: str):
-        embed = await features.process_chanle(self.game_id, choice)
-        if embed is None:
+        container = await features.process_chanle(self.game_id, choice)
+        if container is None:
             await interaction.response.send_message("❌ Ván này đã kết thúc hoặc không tồn tại!", ephemeral=True)
             return
-        for child in self.children:
-            child.disabled = True
-        await _append_ticket_footer(embed, self.owner_id)
-        await interaction.response.edit_message(embed=embed, view=self)
+        self._disable_all_buttons()
+        await _append_ticket_footer(container, self.owner_id)
+        self._set_container(container)
+        await interaction.response.edit_message(view=self)
         await _finish_minigame(interaction, self.owner_id)
         self.stop()
 
-    @discord.ui.button(label="Chẵn", emoji="🔵", style=discord.ButtonStyle.primary)
-    async def btn_chan(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._play(interaction, "chan")
 
-    @discord.ui.button(label="Lẻ", emoji="🟠", style=discord.ButtonStyle.secondary)
-    async def btn_le(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._play(interaction, "le")
-
-    async def on_timeout(self):
-        for child in self.children:
-            child.disabled = True
-
-
-class DoanMauView(discord.ui.View):
+class DoanMauView(GameLayoutView):
     def __init__(self, game_id: str, owner_id: int):
         super().__init__(timeout=60)
         self.game_id = game_id
         self.owner_id = owner_id
-        self.add_item(StopGameButton(game_id, owner_id))
+        for label, style, choice in (
+            ("Đỏ", discord.ButtonStyle.danger, "do"),
+            ("Xanh", discord.ButtonStyle.primary, "xanh"),
+            ("Vàng", discord.ButtonStyle.secondary, "vang"),
+            ("Tím", discord.ButtonStyle.secondary, "tim"),
+        ):
+            button = discord.ui.Button(label=label, style=style)
+            button.callback = self._make_callback(choice)
+            self._add_button(button)
+        self._add_button(StopGameButton(game_id, owner_id))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
             await interaction.response.send_message("Đây không phải ván của bạn!", ephemeral=True)
             return False
         return True
+
+    def _make_callback(self, choice: str):
+        async def callback(interaction: discord.Interaction):
+            await self._play(interaction, choice)
+        return callback
 
     async def _play(self, interaction: discord.Interaction, choice: str):
-        embed = await features.process_doanmau(self.game_id, choice)
-        if embed is None:
+        container = await features.process_doanmau(self.game_id, choice)
+        if container is None:
             await interaction.response.send_message("❌ Ván này đã kết thúc hoặc không tồn tại!", ephemeral=True)
             return
-        for child in self.children:
-            child.disabled = True
-        await _append_ticket_footer(embed, self.owner_id)
-        await interaction.response.edit_message(embed=embed, view=self)
+        self._disable_all_buttons()
+        await _append_ticket_footer(container, self.owner_id)
+        self._set_container(container)
+        await interaction.response.edit_message(view=self)
         await _finish_minigame(interaction, self.owner_id)
         self.stop()
 
-    @discord.ui.button(label="Đỏ", style=discord.ButtonStyle.danger)
-    async def btn_do(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._play(interaction, "do")
 
-    @discord.ui.button(label="Xanh", style=discord.ButtonStyle.primary)
-    async def btn_xanh(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._play(interaction, "xanh")
-
-    @discord.ui.button(label="Vàng", style=discord.ButtonStyle.secondary)
-    async def btn_vang(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._play(interaction, "vang")
-
-    @discord.ui.button(label="Tím", style=discord.ButtonStyle.secondary)
-    async def btn_tim(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._play(interaction, "tim")
-
-    async def on_timeout(self):
-        for child in self.children:
-            child.disabled = True
-
-
-class VongQuayView(discord.ui.View):
+class VongQuayView(GameLayoutView):
     def __init__(self, game_id: str, owner_id: int):
         super().__init__(timeout=60)
         self.game_id = game_id
         self.owner_id = owner_id
-        self.add_item(StopGameButton(game_id, owner_id))
+        button = discord.ui.Button(label="Quay", emoji="🎡", style=discord.ButtonStyle.success)
+        button.callback = self._btn_spin
+        self._add_button(button)
+        self._add_button(StopGameButton(game_id, owner_id))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
@@ -1583,22 +1615,17 @@ class VongQuayView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Quay", emoji="🎡", style=discord.ButtonStyle.success)
-    async def btn_spin(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = await features.process_vongquay(self.game_id)
-        if embed is None:
+    async def _btn_spin(self, interaction: discord.Interaction):
+        container = await features.process_vongquay(self.game_id)
+        if container is None:
             await interaction.response.send_message("❌ Ván này đã kết thúc hoặc không tồn tại!", ephemeral=True)
             return
-        for child in self.children:
-            child.disabled = True
-        await _append_ticket_footer(embed, self.owner_id)
-        await interaction.response.edit_message(embed=embed, view=self)
+        self._disable_all_buttons()
+        await _append_ticket_footer(container, self.owner_id)
+        self._set_container(container)
+        await interaction.response.edit_message(view=self)
         await _finish_minigame(interaction, self.owner_id)
         self.stop()
-
-    async def on_timeout(self):
-        for child in self.children:
-            child.disabled = True
 
 
 class BetAmountModal(discord.ui.Modal, title="Nhập số MICK muốn cược"):
@@ -1629,21 +1656,32 @@ class BetAmountModal(discord.ui.Modal, title="Nhập số MICK muốn cược"):
         owner_id = interaction.user.id
         wallet_display = economy.format_mick(result["wallet"])
         if self.game_kind == "taixiu":
-            gid, embed = features.start_taixiu(owner_id, bet, wallet_display)
-            await _append_ticket_footer(embed, owner_id)
-            await interaction.response.send_message(embed=embed, view=TaiXiuView(gid, owner_id))
+            gid, container = features.start_taixiu(owner_id, bet, wallet_display)
+            await _append_ticket_footer(container, owner_id)
+            view = TaiXiuView(gid, owner_id)
+            view._set_container(container)
+            await interaction.response.send_message(view=view)
         else:
-            gid, embed = features.start_xidach(owner_id, bet, wallet_display)
-            await _append_ticket_footer(embed, owner_id)
-            await interaction.response.send_message(embed=embed, view=XiDachView(gid, owner_id))
+            gid, container = features.start_xidach(owner_id, bet, wallet_display)
+            await _append_ticket_footer(container, owner_id)
+            view = XiDachView(gid, owner_id)
+            view._set_container(container)
+            await interaction.response.send_message(view=view)
 
 
-class TaiXiuView(discord.ui.View):
+class TaiXiuView(GameLayoutView):
     def __init__(self, game_id: str, owner_id: int):
         super().__init__(timeout=60)
         self.game_id = game_id
         self.owner_id = owner_id
-        self.add_item(StopGameButton(game_id, owner_id))
+        for label, emoji, style, choice in (
+            ("Tài (11-18)", "⬆️", discord.ButtonStyle.success, "tai"),
+            ("Xỉu (3-10)", "⬇️", discord.ButtonStyle.danger, "xiu"),
+        ):
+            button = discord.ui.Button(label=label, emoji=emoji, style=style)
+            button.callback = self._make_callback(choice)
+            self._add_button(button)
+        self._add_button(StopGameButton(game_id, owner_id))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
@@ -1651,37 +1689,36 @@ class TaiXiuView(discord.ui.View):
             return False
         return True
 
+    def _make_callback(self, choice: str):
+        async def callback(interaction: discord.Interaction):
+            await self._play(interaction, choice)
+        return callback
+
     async def _play(self, interaction: discord.Interaction, choice: str):
-        embed = await features.process_taixiu(self.game_id, choice)
-        if embed is None:
+        container = await features.process_taixiu(self.game_id, choice)
+        if container is None:
             await interaction.response.send_message("❌ Ván này đã kết thúc hoặc không tồn tại!", ephemeral=True)
             return
-        for child in self.children:
-            child.disabled = True
-        await _append_ticket_footer(embed, self.owner_id)
-        await interaction.response.edit_message(embed=embed, view=self)
+        self._disable_all_buttons()
+        await _append_ticket_footer(container, self.owner_id)
+        self._set_container(container)
+        await interaction.response.edit_message(view=self)
         await _finish_minigame(interaction, self.owner_id)
         self.stop()
 
-    @discord.ui.button(label="Tài (11-18)", emoji="⬆️", style=discord.ButtonStyle.success)
-    async def btn_tai(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._play(interaction, "tai")
 
-    @discord.ui.button(label="Xỉu (3-10)", emoji="⬇️", style=discord.ButtonStyle.danger)
-    async def btn_xiu(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._play(interaction, "xiu")
-
-    async def on_timeout(self):
-        for child in self.children:
-            child.disabled = True
-
-
-class XiDachView(discord.ui.View):
+class XiDachView(GameLayoutView):
     def __init__(self, game_id: str, owner_id: int):
         super().__init__(timeout=120)
         self.game_id = game_id
         self.owner_id = owner_id
-        self.add_item(StopGameButton(game_id, owner_id))
+        draw_btn = discord.ui.Button(label="Rút thêm", emoji="🃏", style=discord.ButtonStyle.primary)
+        draw_btn.callback = self._btn_draw
+        self._add_button(draw_btn)
+        stand_btn = discord.ui.Button(label="Dằn bài", emoji="✋", style=discord.ButtonStyle.success)
+        stand_btn.callback = self._btn_stand
+        self._add_button(stand_btn)
+        self._add_button(StopGameButton(game_id, owner_id))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
@@ -1689,46 +1726,44 @@ class XiDachView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Rút thêm", emoji="🃏", style=discord.ButtonStyle.primary)
-    async def btn_draw(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _btn_draw(self, interaction: discord.Interaction):
         result = features.xidach_draw(self.game_id)
         if result is None:
             await interaction.response.send_message("❌ Ván này đã kết thúc hoặc không tồn tại!", ephemeral=True)
             return
-        embed, finished = result
-        view = None if finished else self
-        await _append_ticket_footer(embed, self.owner_id)
-        await interaction.response.edit_message(embed=embed, view=view)
+        container, finished = result
+        await _append_ticket_footer(container, self.owner_id)
         if finished:
+            self._disable_all_buttons()
+            self._set_container(container)
+            await interaction.response.edit_message(view=self)
             await _finish_minigame(interaction, self.owner_id)
             self.stop()
+        else:
+            self._set_container(container)
+            await interaction.response.edit_message(view=self)
 
-    @discord.ui.button(label="Dằn bài", emoji="✋", style=discord.ButtonStyle.success)
-    async def btn_stand(self, interaction: discord.Interaction, button: discord.ui.Button):
-        embed = await features.xidach_stand(self.game_id)
-        if embed is None:
+    async def _btn_stand(self, interaction: discord.Interaction):
+        container = await features.xidach_stand(self.game_id)
+        if container is None:
             await interaction.response.send_message("❌ Ván này đã kết thúc hoặc không tồn tại!", ephemeral=True)
             return
-        for child in self.children:
-            child.disabled = True
-        await _append_ticket_footer(embed, self.owner_id)
-        await interaction.response.edit_message(embed=embed, view=self)
+        self._disable_all_buttons()
+        await _append_ticket_footer(container, self.owner_id)
+        self._set_container(container)
+        await interaction.response.edit_message(view=self)
         await _finish_minigame(interaction, self.owner_id)
         self.stop()
 
-    async def on_timeout(self):
-        for child in self.children:
-            child.disabled = True
 
-
-class TriviaView(discord.ui.View):
+class TriviaView(GameLayoutView):
     def __init__(self, game_id: str, owner_id: int, options: list[str]):
         super().__init__(timeout=TRIVIA_TIMEOUT_SEC)
         self.game_id = game_id
         self.owner_id = owner_id
         for i, opt in enumerate(options):
-            self.add_item(self._make_button(i, opt))
-        self.add_item(StopGameButton(game_id, owner_id, row=(len(options) - 1) // 5 + 1))
+            self._add_button(self._make_button(i, opt), row=i // 5)
+        self._add_button(StopGameButton(game_id, owner_id), row=(len(options) - 1) // 5 + 1)
 
     def _make_button(self, index: int, label: str) -> discord.ui.Button:
         button = discord.ui.Button(label=label, style=discord.ButtonStyle.secondary)
@@ -1737,14 +1772,14 @@ class TriviaView(discord.ui.View):
             if interaction.user.id != self.owner_id:
                 await interaction.response.send_message("Đây không phải ván của bạn!", ephemeral=True)
                 return
-            embed = await features.process_trivia(self.game_id, index)
-            if embed is None:
+            container = await features.process_trivia(self.game_id, index)
+            if container is None:
                 await interaction.response.send_message("❌ Ván này đã kết thúc hoặc không tồn tại!", ephemeral=True)
                 return
-            for child in self.children:
-                child.disabled = True
-            await _append_ticket_footer(embed, self.owner_id)
-            await interaction.response.edit_message(embed=embed, view=self)
+            self._disable_all_buttons()
+            await _append_ticket_footer(container, self.owner_id)
+            self._set_container(container)
+            await interaction.response.edit_message(view=self)
             await _finish_minigame(interaction, self.owner_id)
             self.stop()
 
@@ -1753,17 +1788,15 @@ class TriviaView(discord.ui.View):
 
     async def on_timeout(self):
         await features.trivia_timeout(self.game_id)
-        for child in self.children:
-            child.disabled = True
+        self._disable_all_buttons()
 
 
-async def _append_ticket_footer(embed: discord.Embed, user_id: int):
-    """Gắn số Vé còn lại vào footer embed - hiển thị mỗi lần chơi game hoặc
+async def _append_ticket_footer(container: discord.ui.Container, user_id: int):
+    """Gắn số Vé còn lại vào cuối Container - hiển thị mỗi lần chơi game hoặc
     đang trong game (theo yêu cầu), không trừ thêm Vé."""
     ve = await economy.get_ve(user_id)
     line = f"{TICKET_EMOJI} Vé còn lại: {economy.format_ve(ve)}"
-    old = embed.footer.text if embed.footer else None
-    embed.set_footer(text=f"{old} · {line}" if old else line)
+    container.add_item(discord.ui.TextDisplay(f"-# {line}"))
 
 
 async def _require_ticket(interaction: discord.Interaction) -> bool:
@@ -1791,10 +1824,41 @@ async def _finish_minigame(interaction: discord.Interaction, owner_id: int):
         log.warning("Kiểm tra thành tựu sau minigame lỗi: %s", e)
 
 
-class GameChooserView(discord.ui.View):
+class GameChooserView(GameLayoutView):
     def __init__(self, owner_id: int):
         super().__init__(timeout=30)
         self.owner_id = owner_id
+        self._container.add_item(
+            discord.ui.TextDisplay(
+                "### 🎮 Chọn minigame\n"
+                "Bấm nút bên dưới để chơi. Mỗi ván có 1 ID riêng, tra lại bằng `/check-game`.\n"
+                "Mọi ván đều có nút 🛑 **Dừng ván** nếu muốn thoát giữa chừng.\n\n"
+                "🎲 **Tài Xỉu** và 🃏 **Xì Dách** ăn thua MICK thật (cược tự do, miễn đủ số dư) — "
+                "các game còn lại chơi miễn phí, thắng nhận thưởng cố định (riêng 🎡 **Vòng Quay May Mắn** "
+                "không bao giờ thua, chỉ random mức thưởng)."
+            )
+        )
+
+        row0 = (
+            ("Wordle", "🟩", discord.ButtonStyle.success, self._btn_wordle),
+            ("Đoán số", "🔢", discord.ButtonStyle.primary, self._btn_guess_number),
+            ("Kéo Búa Bao", "✊", discord.ButtonStyle.secondary, self._btn_rps),
+        )
+        row1 = (
+            ("Trivia (đố vui)", "🧠", discord.ButtonStyle.primary, self._btn_trivia),
+            ("Tài Xỉu (cược MICK)", "🎲", discord.ButtonStyle.danger, self._btn_taixiu),
+            ("Xì Dách (cược MICK)", "🃏", discord.ButtonStyle.danger, self._btn_xidach),
+        )
+        row2 = (
+            ("Chẵn Lẻ", "🎲", discord.ButtonStyle.primary, self._btn_chanle),
+            ("Đoán Màu", "🎨", discord.ButtonStyle.primary, self._btn_doanmau),
+            ("Vòng Quay May Mắn", "🎡", discord.ButtonStyle.success, self._btn_vongquay),
+        )
+        for row_index, row_defs in enumerate((row0, row1, row2)):
+            for label, emoji, style, handler in row_defs:
+                button = discord.ui.Button(label=label, emoji=emoji, style=style)
+                button.callback = handler
+                self._add_button(button, row=row_index)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
@@ -1802,8 +1866,7 @@ class GameChooserView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Wordle", emoji="🟩", style=discord.ButtonStyle.success, row=0)
-    async def btn_wordle(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _btn_wordle(self, interaction: discord.Interaction):
         existing_gid = features.user_active_wordle_id(self.owner_id)
         if existing_gid:
             await interaction.response.send_message(
@@ -1813,65 +1876,71 @@ class GameChooserView(discord.ui.View):
             return
         if not await _require_ticket(interaction):
             return
-        gid, embed = features.start_wordle(self.owner_id)
-        await _append_ticket_footer(embed, self.owner_id)
-        await interaction.response.edit_message(embed=embed, view=WordleView(gid, self.owner_id))
+        gid, container = features.start_wordle(self.owner_id)
+        await _append_ticket_footer(container, self.owner_id)
+        view = WordleView(gid, self.owner_id)
+        view._set_container(container)
+        await interaction.response.edit_message(view=view)
 
-    @discord.ui.button(label="Đoán số", emoji="🔢", style=discord.ButtonStyle.primary, row=0)
-    async def btn_guess_number(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _btn_guess_number(self, interaction: discord.Interaction):
         if not await _require_ticket(interaction):
             return
-        gid, embed = features.start_guess_number(self.owner_id)
-        await _append_ticket_footer(embed, self.owner_id)
-        await interaction.response.edit_message(embed=embed, view=GuessNumberView(gid, self.owner_id))
+        gid, container = features.start_guess_number(self.owner_id)
+        await _append_ticket_footer(container, self.owner_id)
+        view = GuessNumberView(gid, self.owner_id)
+        view._set_container(container)
+        await interaction.response.edit_message(view=view)
 
-    @discord.ui.button(label="Kéo Búa Bao", emoji="✊", style=discord.ButtonStyle.secondary, row=0)
-    async def btn_rps(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _btn_rps(self, interaction: discord.Interaction):
         if not await _require_ticket(interaction):
             return
-        gid, embed = features.start_rps(self.owner_id)
-        await _append_ticket_footer(embed, self.owner_id)
-        await interaction.response.edit_message(embed=embed, view=RPSView(gid, self.owner_id))
+        gid, container = features.start_rps(self.owner_id)
+        await _append_ticket_footer(container, self.owner_id)
+        view = RPSView(gid, self.owner_id)
+        view._set_container(container)
+        await interaction.response.edit_message(view=view)
 
-    @discord.ui.button(label="Trivia (đố vui)", emoji="🧠", style=discord.ButtonStyle.primary, row=1)
-    async def btn_trivia(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _btn_trivia(self, interaction: discord.Interaction):
         if not await _require_ticket(interaction):
             return
-        gid, embed, options = features.start_trivia(self.owner_id)
-        await _append_ticket_footer(embed, self.owner_id)
-        await interaction.response.edit_message(embed=embed, view=TriviaView(gid, self.owner_id, options))
+        gid, container, options = features.start_trivia(self.owner_id)
+        await _append_ticket_footer(container, self.owner_id)
+        view = TriviaView(gid, self.owner_id, options)
+        view._set_container(container)
+        await interaction.response.edit_message(view=view)
 
-    @discord.ui.button(label="Tài Xỉu (cược MICK)", emoji="🎲", style=discord.ButtonStyle.danger, row=1)
-    async def btn_taixiu(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _btn_taixiu(self, interaction: discord.Interaction):
         await interaction.response.send_modal(BetAmountModal("taixiu"))
 
-    @discord.ui.button(label="Xì Dách (cược MICK)", emoji="🃏", style=discord.ButtonStyle.danger, row=1)
-    async def btn_xidach(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _btn_xidach(self, interaction: discord.Interaction):
         await interaction.response.send_modal(BetAmountModal("xidach"))
 
-    @discord.ui.button(label="Chẵn Lẻ", emoji="🎲", style=discord.ButtonStyle.primary, row=2)
-    async def btn_chanle(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _btn_chanle(self, interaction: discord.Interaction):
         if not await _require_ticket(interaction):
             return
-        gid, embed = features.start_chanle(self.owner_id)
-        await _append_ticket_footer(embed, self.owner_id)
-        await interaction.response.edit_message(embed=embed, view=ChanLeView(gid, self.owner_id))
+        gid, container = features.start_chanle(self.owner_id)
+        await _append_ticket_footer(container, self.owner_id)
+        view = ChanLeView(gid, self.owner_id)
+        view._set_container(container)
+        await interaction.response.edit_message(view=view)
 
-    @discord.ui.button(label="Đoán Màu", emoji="🎨", style=discord.ButtonStyle.primary, row=2)
-    async def btn_doanmau(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _btn_doanmau(self, interaction: discord.Interaction):
         if not await _require_ticket(interaction):
             return
-        gid, embed = features.start_doanmau(self.owner_id)
-        await _append_ticket_footer(embed, self.owner_id)
-        await interaction.response.edit_message(embed=embed, view=DoanMauView(gid, self.owner_id))
+        gid, container = features.start_doanmau(self.owner_id)
+        await _append_ticket_footer(container, self.owner_id)
+        view = DoanMauView(gid, self.owner_id)
+        view._set_container(container)
+        await interaction.response.edit_message(view=view)
 
-    @discord.ui.button(label="Vòng Quay May Mắn", emoji="🎡", style=discord.ButtonStyle.success, row=2)
-    async def btn_vongquay(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _btn_vongquay(self, interaction: discord.Interaction):
         if not await _require_ticket(interaction):
             return
-        gid, embed = features.start_vongquay(self.owner_id)
-        await _append_ticket_footer(embed, self.owner_id)
-        await interaction.response.edit_message(embed=embed, view=VongQuayView(gid, self.owner_id))
+        gid, container = features.start_vongquay(self.owner_id)
+        await _append_ticket_footer(container, self.owner_id)
+        view = VongQuayView(gid, self.owner_id)
+        view._set_container(container)
+        await interaction.response.edit_message(view=view)
 
 
 @tree.command(
@@ -1879,30 +1948,19 @@ class GameChooserView(discord.ui.View):
     description="Chơi minigame: Wordle, Đoán số, Kéo Búa Bao, Trivia, Tài Xỉu, Xì Dách, Chẵn Lẻ, Đoán Màu, Vòng Quay",
 )
 async def game_cmd(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="🎮 Chọn minigame",
-        description=(
-            "Bấm nút bên dưới để chơi. Mỗi ván có 1 ID riêng, tra lại bằng `/check-game`.\n"
-            "Mọi ván đều có nút 🛑 **Dừng ván** nếu muốn thoát giữa chừng.\n\n"
-            "🎲 **Tài Xỉu** và 🃏 **Xì Dách** ăn thua MICK thật (cược tự do, miễn đủ số dư) — "
-            "các game còn lại chơi miễn phí, thắng nhận thưởng cố định (riêng 🎡 **Vòng Quay May Mắn** "
-            "không bao giờ thua, chỉ random mức thưởng)."
-        ),
-        color=discord.Color.gold(),
-    )
-    await interaction.response.send_message(embed=embed, view=GameChooserView(interaction.user.id))
+    await interaction.response.send_message(view=GameChooserView(interaction.user.id))
 
 
 @tree.command(name="check-game", description="Tra thông tin/trạng thái 1 ván minigame theo ID")
 @discord.app_commands.describe(id_van="ID ván game (vd: a1b2c3d4), xem ở footer embed ván chơi")
 async def tra_game_cmd(interaction: discord.Interaction, id_van: str):
-    embed = features.lookup_game(id_van)
-    if embed is None:
+    container = features.lookup_game(id_van)
+    if container is None:
         await interaction.response.send_message(
             f"❌ Không tìm thấy ván với ID `{id_van}` (gõ sai hoặc đã hết hạn tra).", ephemeral=True
         )
         return
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    await interaction.response.send_message(view=features.SimpleContainerLayout(container), ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
@@ -1916,7 +1974,7 @@ _LEADERBOARD_PAGE_SIZE = 10
 _LEADERBOARD_MAX_ENTRIES = 50
 
 
-def _build_leaderboard_embed(interaction: discord.Interaction, users: list, sort_key: str, shown: int) -> discord.Embed:
+def _build_leaderboard_container(interaction: discord.Interaction, users: list, sort_key: str, shown: int) -> discord.ui.Container:
     top = users[:shown]
     lines = []
     for i, (uid, data) in enumerate(top, start=1):
@@ -1932,23 +1990,50 @@ def _build_leaderboard_embed(interaction: discord.Interaction, users: list, sort
             lines.append(f"{medal} **{name}**{crown} — {MICKCOIN_EMOJI} {mick_display} (Level {data.get('level', 0)})")
 
     title = "🏆 Xếp hạng Level" if sort_key == "level" else "🏆 Xếp hạng MICK Coin"
-    embed = discord.Embed(title=title, description="\n".join(lines) or "Chưa có dữ liệu", color=discord.Color.orange())
+    footer = None
     if shown < len(users) and shown < _LEADERBOARD_MAX_ENTRIES:
-        embed.set_footer(text=f"Đang hiện {min(shown, len(users))}/{min(len(users), _LEADERBOARD_MAX_ENTRIES)} — bấm \"Xem thêm\" để xem tiếp")
-    return embed
+        footer = f"Đang hiện {min(shown, len(users))}/{min(len(users), _LEADERBOARD_MAX_ENTRIES)} — bấm \"Xem thêm\" để xem tiếp"
+    return features.build_container(
+        title=title,
+        description="\n".join(lines) or "Chưa có dữ liệu",
+        color=discord.Color.orange(),
+        footer=footer,
+    )
 
 
-class LeaderboardView(discord.ui.View):
-    """Bảng xếp hạng có nút 'Xem thêm' (lộ thêm 1 trang) + select để xem
-    nhanh hồ sơ 1 người trong danh sách. Hồ sơ của owner bị khoá - chỉ chính
-    owner mới xem được qua đây, người khác bấm vào sẽ bị báo lỗi."""
+class LeaderboardView(discord.ui.LayoutView):
+    """Components V2 - thay cho LeaderboardView (embed) cũ. Bảng xếp hạng có
+    nút 'Xem thêm' (lộ thêm 1 trang) + select để xem nhanh hồ sơ 1 người
+    trong danh sách. Hồ sơ của owner bị khoá - chỉ chính owner mới xem được
+    qua đây, người khác bấm vào sẽ bị báo lỗi."""
 
-    def __init__(self, users: list, sort_key: str, owner_id: int):
+    def __init__(self, interaction: discord.Interaction, users: list, sort_key: str, owner_id: int):
         super().__init__(timeout=120)
+        self._interaction = interaction
         self.users = users[:_LEADERBOARD_MAX_ENTRIES]
         self.sort_key = sort_key
         self.owner_id = owner_id  # id người đã gõ lệnh /leaderboard (không phải chủ bot)
         self.shown = min(_LEADERBOARD_PAGE_SIZE, len(self.users))
+
+        self._container = discord.ui.Container()
+        self.add_item(self._container)
+        self._select_row = discord.ui.ActionRow()
+        self.add_item(self._select_row)
+        self._button_row = discord.ui.ActionRow()
+        self.add_item(self._button_row)
+
+        self._select: discord.ui.Select | None = None
+        self.btn_more = discord.ui.Button(label="Xem thêm", emoji="➕", style=discord.ButtonStyle.secondary)
+        self.btn_more.callback = self._on_more
+        self._button_row.add_item(self.btn_more)
+
+        self._render()
+
+    def _render(self):
+        new_container = _build_leaderboard_container(self._interaction, self.users, self.sort_key, self.shown)
+        self._container.clear_items()
+        for item in new_container.children:
+            self._container.add_item(item)
         self._sync_more_button()
         self._rebuild_select()
 
@@ -1956,23 +2041,21 @@ class LeaderboardView(discord.ui.View):
         self.btn_more.disabled = self.shown >= len(self.users)
 
     def _rebuild_select(self):
-        # Xoá select cũ (nếu có) rồi build lại theo đúng số dòng đang hiển thị
-        for item in list(self.children):
-            if isinstance(item, discord.ui.Select):
-                self.remove_item(item)
+        self._select_row.clear_items()
         top = self.users[: self.shown]
         if not top:
+            self._select = None
             return
         options = []
         for i, (uid, data) in enumerate(top, start=1):
             options.append(discord.SelectOption(label=f"#{i} · {data.get('_display_name', uid)}", value=uid))
         select = discord.ui.Select(placeholder="🔍 Xem hồ sơ 1 người trong bảng...", options=options[:25])
         select.callback = self._on_select
-        self.add_item(select)
+        self._select = select
+        self._select_row.add_item(select)
 
     async def _on_select(self, interaction: discord.Interaction):
-        select = [c for c in self.children if isinstance(c, discord.ui.Select)][0]
-        target_id = int(select.values[0])
+        target_id = int(self._select.values[0])
 
         if economy.is_owner(target_id) and interaction.user.id != target_id:
             await interaction.response.send_message(
@@ -1989,13 +2072,10 @@ class LeaderboardView(discord.ui.View):
         container, file = await _build_profile_content(member)
         await interaction.response.send_message(view=_SimpleContainerLayout(container), file=file, ephemeral=True)
 
-    @discord.ui.button(label="Xem thêm", emoji="➕", style=discord.ButtonStyle.secondary)
-    async def btn_more(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _on_more(self, interaction: discord.Interaction):
         self.shown = min(self.shown + _LEADERBOARD_PAGE_SIZE, len(self.users))
-        self._sync_more_button()
-        self._rebuild_select()
-        embed = _build_leaderboard_embed(interaction, self.users, self.sort_key, self.shown)
-        await interaction.response.edit_message(embed=embed, view=self)
+        self._render()
+        await interaction.response.edit_message(view=self)
 
 
 @tree.command(name="leaderboard", description="Bảng xếp hạng Level và MICK Coin")
@@ -2021,9 +2101,8 @@ async def leaderboard_cmd(interaction: discord.Interaction, loai: discord.app_co
         member = interaction.guild.get_member(int(uid)) if interaction.guild else None
         data["_display_name"] = member.display_name if member else f"User {uid}"
 
-    view = LeaderboardView(users, sort_key, owner_id=interaction.user.id)
-    embed = _build_leaderboard_embed(interaction, users, sort_key, view.shown)
-    await interaction.followup.send(embed=embed, view=view)
+    view = LeaderboardView(interaction, users, sort_key, owner_id=interaction.user.id)
+    await interaction.followup.send(view=view)
 
 
 # ---------------------------------------------------------------------------
@@ -2034,8 +2113,8 @@ async def leaderboard_cmd(interaction: discord.Interaction, loai: discord.app_co
 @tree.command(name="achievements", description="Xem danh sách thành tựu")
 async def achievements_cmd(interaction: discord.Interaction):
     user = await db.get_user(interaction.user.id)
-    embed = features.build_list_embed(user.get("achievements", []))
-    await interaction.response.send_message(embed=embed)
+    container = features.build_list_container(user.get("achievements", []))
+    await interaction.response.send_message(view=features.SimpleContainerLayout(container))
 
 
 @tree.command(name="quest", description="Xem quest hằng ngày của bạn")
@@ -2047,8 +2126,8 @@ async def quest_cmd(interaction: discord.Interaction):
         if interaction.guild is not None:
             invite_link = await _get_or_create_invite_link(interaction.guild, interaction.user, user)
 
-    embed = features.build_quest_embed(user, interaction.user.display_name, invite_link=invite_link)
-    await interaction.response.send_message(embed=embed)
+    container = features.build_quest_container(user, interaction.user.display_name, invite_link=invite_link)
+    await interaction.response.send_message(view=features.SimpleContainerLayout(container))
 
 
 @tree.command(
@@ -2222,10 +2301,15 @@ async def transfer_cmd(interaction: discord.Interaction, nguoi_nhan: discord.Mem
 async def atm_cmd(interaction: discord.Interaction, hanh_dong: discord.app_commands.Choice[str], so_tien: int = 0):
     if hanh_dong.value == "check":
         info = await economy.get_atm_profile(interaction.user.id)
-        embed = discord.Embed(title="🏧 ATM MICK Coin", color=discord.Color.blue())
-        embed.add_field(name="Ví (tiêu xài)", value=f"{info['wallet']} 🪙", inline=True)
-        embed.add_field(name="ATM (giữ hộ)", value=f"{info['atm']} 🪙", inline=True)
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        container = features.build_container(
+            title="🏧 ATM MICK Coin",
+            color=discord.Color.blue(),
+            fields=[
+                ("Ví (tiêu xài)", f"{info['wallet']} 🪙"),
+                ("ATM (giữ hộ)", f"{info['atm']} 🪙"),
+            ],
+        )
+        await interaction.response.send_message(view=features.SimpleContainerLayout(container), ephemeral=True)
         return
 
     if so_tien <= 0:
@@ -2312,12 +2396,30 @@ class BusinessActionView(discord.ui.View):
         self.add_item(BusinessKindSelect(action, owner_id))
 
 
-class BusinessView(discord.ui.View):
-    """Gộp /business + /open_business + /hire cũ: 3 nút trên cùng 1 message."""
+class BusinessView(discord.ui.LayoutView):
+    """Components V2 - thay cho BusinessView (embed) cũ. Gộp /business +
+    /open_business + /hire cũ: 3 nút trên cùng 1 message."""
 
-    def __init__(self, owner_id: int):
+    def __init__(self, owner_id: int, container: discord.ui.Container):
         super().__init__(timeout=120)
         self.owner_id = owner_id
+        self._container = container
+        self.add_item(self._container)
+
+        row = discord.ui.ActionRow()
+        self.add_item(row)
+
+        btn_view = discord.ui.Button(label="Xem tổng quan", emoji="📊", style=discord.ButtonStyle.primary)
+        btn_view.callback = self._btn_view
+        row.add_item(btn_view)
+
+        btn_open = discord.ui.Button(label="Mở cơ sở mới", emoji="🏪", style=discord.ButtonStyle.success)
+        btn_open.callback = self._btn_open
+        row.add_item(btn_open)
+
+        btn_hire = discord.ui.Button(label="Thuê nhân viên", emoji="👥", style=discord.ButtonStyle.secondary)
+        btn_hire.callback = self._btn_hire
+        row.add_item(btn_hire)
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
@@ -2325,20 +2427,23 @@ class BusinessView(discord.ui.View):
             return False
         return True
 
-    @discord.ui.button(label="Xem tổng quan", emoji="📊", style=discord.ButtonStyle.primary)
-    async def btn_view(self, interaction: discord.Interaction, button: discord.ui.Button):
-        summary = await features.get_summary(self.owner_id)
-        embed = features.build_summary_embed(interaction.user.display_name, summary)
-        await interaction.response.edit_message(embed=embed, view=self)
+    def _set_container(self, new_container: discord.ui.Container) -> None:
+        self._container.clear_items()
+        for item in new_container.children:
+            self._container.add_item(item)
 
-    @discord.ui.button(label="Mở cơ sở mới", emoji="🏪", style=discord.ButtonStyle.success)
-    async def btn_open(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _btn_view(self, interaction: discord.Interaction):
+        summary = await features.get_summary(self.owner_id)
+        new_container = features.build_summary_container(interaction.user.display_name, summary)
+        self._set_container(new_container)
+        await interaction.response.edit_message(view=self)
+
+    async def _btn_open(self, interaction: discord.Interaction):
         await interaction.response.send_message(
             "Chọn loại hình muốn mở:", view=BusinessActionView("open", self.owner_id), ephemeral=True
         )
 
-    @discord.ui.button(label="Thuê nhân viên", emoji="👥", style=discord.ButtonStyle.secondary)
-    async def btn_hire(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _btn_hire(self, interaction: discord.Interaction):
         await interaction.response.send_message(
             "Chọn loại hình muốn thuê thêm nhân viên:", view=BusinessActionView("hire", self.owner_id), ephemeral=True
         )
@@ -2347,8 +2452,8 @@ class BusinessView(discord.ui.View):
 @tree.command(name="business", description="Xem, mở cơ sở mới, hoặc thuê nhân viên cho cơ ngơi kinh doanh")
 async def business_cmd(interaction: discord.Interaction):
     summary = await features.get_summary(interaction.user.id)
-    embed = features.build_summary_embed(interaction.user.display_name, summary)
-    await interaction.response.send_message(embed=embed, view=BusinessView(interaction.user.id))
+    container = features.build_summary_container(interaction.user.display_name, summary)
+    await interaction.response.send_message(view=BusinessView(interaction.user.id, container))
 
 
 # ---------------------------------------------------------------------------
@@ -2399,27 +2504,38 @@ class LookupWordModal(discord.ui.Modal, title="Tra từ"):
             )
 
 
-class DictionaryView(discord.ui.View):
+class DictionaryView(discord.ui.LayoutView):
+    """Components V2 - thay cho DictionaryView (embed) cũ."""
+
     def __init__(self):
         super().__init__(timeout=120)
+        container = features.build_container(
+            title="📚 Từ điển server",
+            description="Bấm nút bên dưới để tra 1 từ đã học, hoặc dạy bot nghĩa 1 từ mới.",
+            color=discord.Color.blue(),
+        )
+        self.add_item(container)
+        row = discord.ui.ActionRow()
+        self.add_item(row)
 
-    @discord.ui.button(label="Tra từ", emoji="📖", style=discord.ButtonStyle.primary)
-    async def btn_lookup(self, interaction: discord.Interaction, button: discord.ui.Button):
+        btn_lookup = discord.ui.Button(label="Tra từ", emoji="📖", style=discord.ButtonStyle.primary)
+        btn_lookup.callback = self._btn_lookup
+        row.add_item(btn_lookup)
+
+        btn_teach = discord.ui.Button(label="Dạy từ", emoji="✏️", style=discord.ButtonStyle.success)
+        btn_teach.callback = self._btn_teach
+        row.add_item(btn_teach)
+
+    async def _btn_lookup(self, interaction: discord.Interaction):
         await interaction.response.send_modal(LookupWordModal())
 
-    @discord.ui.button(label="Dạy từ", emoji="✏️", style=discord.ButtonStyle.success)
-    async def btn_teach(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def _btn_teach(self, interaction: discord.Interaction):
         await interaction.response.send_modal(TeachWordModal())
 
 
 @tree.command(name="dictionary", description="Tra hoặc dạy bot nghĩa từ/cụm từ lóng trong server")
 async def tudien_cmd(interaction: discord.Interaction):
-    embed = discord.Embed(
-        title="📚 Từ điển server",
-        description="Bấm nút bên dưới để tra 1 từ đã học, hoặc dạy bot nghĩa 1 từ mới.",
-        color=discord.Color.blue(),
-    )
-    await interaction.response.send_message(embed=embed, view=DictionaryView(), ephemeral=True)
+    await interaction.response.send_message(view=DictionaryView(), ephemeral=True)
 
 
 @tree.command(name="ask-ai", description="Chat trực tiếp với AI của bot (Groq)")
@@ -2506,16 +2622,18 @@ class ConfessionModal(discord.ui.Modal, title="Gửi thú tội ẩn danh"):
         random_id = secrets.token_urlsafe(24)  # random 100%, KHÔNG suy ra được từ user ID
         await db.save_confession(random_id, {"user_id": interaction.user.id, "number": number, "ts": now})
 
-        embed = discord.Embed(
+        unix_ts = int(datetime.now(timezone.utc).timestamp())
+        container = features.build_container(
             title=f"Lời Thú Tội Ẩn Danh #{number}",
-            description=text,
+            description=f"{text}\n\n-# ID: {random_id} · <t:{unix_ts}:f>",
             color=discord.Color.dark_purple(),
-            timestamp=datetime.now(timezone.utc),
+            footer="Thú tội ẩn danh · không thể truy ra người gửi",
         )
-        embed.set_author(name=f"ID: {random_id}")
-        embed.set_footer(text="Thú tội ẩn danh · không thể truy ra người gửi")
 
-        await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+        await channel.send(
+            view=features.SimpleContainerLayout(container),
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
         await interaction.response.send_message(
             f"✅ Đã gửi thú tội **#{number}** ẩn danh vào {channel.mention}!", ephemeral=True
         )
