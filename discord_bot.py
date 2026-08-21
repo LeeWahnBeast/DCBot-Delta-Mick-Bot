@@ -67,6 +67,7 @@ from config import (
     CONFESSION_CHANNEL_ID,
     CONFESSION_COOLDOWN_SEC,
     WELCOME_CHANNEL_ID,
+    BOT_ROLE_ID,
     log,
 )
 from tiktok_client import TikTokClient
@@ -867,6 +868,19 @@ async def _send_welcome_card(member: discord.Member) -> None:
         log.warning("Gửi welcome card lỗi: %s", e)
 
 
+async def _assign_bot_role(member: discord.Member) -> None:
+    """Tự gán role Bot (BOT_ROLE_ID) khi có bot khác được add vào server -
+    member thường KHÔNG đụng tới role này (role member do bot khác tự lo)."""
+    role = member.guild.get_role(BOT_ROLE_ID)
+    if role is None:
+        log.warning("_assign_bot_role: không tìm thấy role %s trong guild", BOT_ROLE_ID)
+        return
+    try:
+        await member.add_roles(role, reason="Tự động gán role Bot khi bot mới được add vào server")
+    except Exception as e:
+        log.warning("Gán role Bot cho %s lỗi: %s", member, e)
+
+
 @client.event
 async def on_member_join(member: discord.Member):
     if member.guild.id != DISCORD_GUILD_ID:
@@ -875,6 +889,7 @@ async def on_member_join(member: discord.Member):
     _fire_and_forget(_maybe_announce_member_milestone(member.guild), "Thông báo mốc thành viên lỗi")
 
     if member.bot:
+        _fire_and_forget(_assign_bot_role(member), "Gán role Bot lỗi")
         return
 
     _fire_and_forget(_send_welcome_card(member), "Gửi welcome card lỗi")
@@ -2594,7 +2609,7 @@ async def ai_cmd(interaction: discord.Interaction, noi_dung: str):
 
     if ai_chat.needs_web_search(noi_dung):
         status_msg = await interaction.followup.send("-# 🔎 đang tìm kiếm trên mạng...", wait=True)
-        result, ok, reason = await ai_chat.search_answer(ai_chat.SYSTEM_PROMPT, noi_dung)
+        result, ok, reason = await ai_chat._tavily_search_answer(ai_chat.SYSTEM_PROMPT, noi_dung)
         if ok and result:
             final_text = ai_chat._sanitize_ai_output(result)
             if len(final_text) > 2000:
