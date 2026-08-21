@@ -839,7 +839,17 @@ async def _send_welcome_card(member: discord.Member) -> None:
     member_count hiện tại của guild ngay lúc join."""
     channel = member.guild.get_channel(WELCOME_CHANNEL_ID) or client.get_channel(WELCOME_CHANNEL_ID)
     if channel is None:
-        return
+        # get_channel chỉ tra cache - nếu bot chưa cache đúng kênh này (hoặc
+        # ID sai/bot không có quyền xem kênh) thì fetch trực tiếp từ API để
+        # biết CHÍNH XÁC lý do, thay vì âm thầm bỏ qua như trước.
+        try:
+            channel = await client.fetch_channel(WELCOME_CHANNEL_ID)
+        except Exception as e:
+            log.warning(
+                "_send_welcome_card: không lấy được kênh %s (kiểm tra ID kênh + quyền View Channel của bot): %s",
+                WELCOME_CHANNEL_ID, e,
+            )
+            return
 
     try:
         buf = await welcome_card.render_welcome_card(
@@ -864,8 +874,9 @@ async def _send_welcome_card(member: discord.Member) -> None:
             await channel.send(content=text, file=file)
         else:
             await channel.send(content=text)
+        log.info("Đã gửi welcome card cho %s (#%s) ở kênh %s", member, member.guild.member_count, WELCOME_CHANNEL_ID)
     except Exception as e:
-        log.warning("Gửi welcome card lỗi: %s", e)
+        log.warning("Gửi welcome card lỗi (kiểm tra quyền Send Messages + Attach Files của bot ở kênh %s): %s", WELCOME_CHANNEL_ID, e)
 
 
 async def _assign_bot_role(member: discord.Member) -> None:
