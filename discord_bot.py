@@ -857,12 +857,14 @@ async def _send_welcome_card(member: discord.Member) -> None:
             return
 
     try:
-        buf = await welcome_card.render_welcome_card(
+        buf, avatar_err = await welcome_card.render_welcome_card(
             display_name=member.display_name,
             avatar_url=member.display_avatar.replace(size=256).url,
             member_number=member.guild.member_count,
         )
         file = discord.File(buf, filename="welcome.png")
+        if avatar_err:
+            log.warning("Welcome card: tải/dán avatar của %s lỗi (card vẫn gửi, chỉ thiếu avatar): %s", member, avatar_err)
     except Exception as e:
         log.warning("Render welcome card lỗi: %s", e)
         file = None
@@ -871,7 +873,7 @@ async def _send_welcome_card(member: discord.Member) -> None:
         f"# Chào mừng bradar {member.mention} đã đến với server của Delta Mick <:mango:1529287058072408195>\n\n"
         f"- Hãy xem qua <id:guide> và đọc luật nhé, nhớ tích cực chat nhiều vào để không bị ghẻ bi 🗿\n\n"
         f"- Và đương nhiên là tôi cũng sẽ khá thất vọng nếu các bradar chưa follow kênh "
-        f"[***Delta Mick***](https://www.tiktok.com/@tahnuyo_0?_r=1&_t=ZS-993g64YqnBd) đấy <:sad:1531310182016094328>"
+        f"[***Delta Mick***](<https://www.tiktok.com/@tahnuyo_0?_r=1&_t=ZS-993g64YqnBd>) đấy <:sad:1531310182016094328>"
     )
 
     try:

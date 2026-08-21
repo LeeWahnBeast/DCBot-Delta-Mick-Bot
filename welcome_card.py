@@ -2,13 +2,15 @@
 Render ảnh "welcome card" khi có thành viên mới join server - dùng ảnh nền
 tĩnh (assets/welcome/welcome_bg.png, do admin tự thiết kế/đổi) và đè lên:
 
-  - Số thứ tự thành viên ("#12345") - to, ngay dưới dòng "Con gà thứ:"
-  - Tên hiển thị (display_name) - nhỏ hơn, ngay dưới số thứ tự
-  - Avatar tròn của người vừa join - góc phải, xu
+  - Avatar hình chữ nhật (không tròn), chiếm gần nửa phải card, mép trái cắt
+    chéo (diagonal cut) - style lấy theo mẫu "Tohmcord" Mango gửi.
+  - Số thứ tự thành viên ("#12345") - to, MỜ (watermark xám nhạt), nằm phía
+    sau/trên phần đầu của tên.
+  - Tên hiển thị - đậm, trắng, đè lên ngay trên số, căn trái, tự xuống dòng
+    nếu dài (tối đa 2 dòng, tự co cỡ chữ nếu vẫn không vừa).
 
-Bố cục toạ độ được đo/tinh chỉnh theo đúng khung nền 500x350 mà Mango cung
-cấp (assets/welcome/welcome_bg.png) - nếu đổi nền khác kích thước khác thì
-cần chỉnh lại các hằng số toạ độ bên dưới.
+Bố cục toạ độ đo theo khung nền 500x350 - nếu đổi nền khác kích thước khác
+thì cần chỉnh lại các hằng số toạ độ bên dưới.
 
 Font dùng chung DejaVu Sans bundle sẵn trong assets/fonts/ (giống
 level_card.py) để đảm bảo hiển thị đúng tiếng Việt có dấu trên mọi môi
@@ -42,11 +44,18 @@ if not os.path.exists(_BG_PATH):
 
 _W, _H = 500, 350
 _WHITE = (255, 255, 255)
-_TEAL = (78, 178, 194)  # màu gần với "Con gà thứ:" trên nền mẫu
+_NUMBER_GREY = (150, 152, 158)  # số thứ tự mờ kiểu watermark, gần màu nền tối
 
-# Avatar: tròn, đặt góc phải giữa card (dưới header, trên dòng welcome)
-_AVATAR_SIZE = 120
-_AVATAR_CENTER = (390, 175)
+# --- Avatar: khối chữ nhật chiếm nửa phải card, mép trái cắt chéo ---
+_AVATAR_RIGHT = _W - 14      # cách mép phải 1 chút để không đè viền bo góc
+_AVATAR_TOP = 78             # bắt đầu ngay dưới logo header, không đè "DeltaCord"
+_AVATAR_BOTTOM = _H - 60     # dừng trước dòng chữ "Chào mừng..." ở đáy card
+_AVATAR_LEFT_TOP = 330       # x của mép trái avatar ở hàng trên (chỗ bắt đầu cắt chéo)
+_AVATAR_LEFT_BOTTOM = 260    # x của mép trái avatar ở hàng dưới (chéo rộng hơn ở đáy)
+
+# --- Vùng chữ (số + tên) ---
+_TEXT_LEFT = 24
+_TEXT_RIGHT_MAX = 305  # không lấn qua avatar ở hàng trên
 
 
 def _font(path: str, size: int) -> ImageFont.FreeTypeFont:
@@ -59,7 +68,7 @@ def _fit_text(
     font_path: str,
     max_width: int,
     start_size: int,
-    min_size: int = 18,
+    min_size: int = 16,
 ) -> ImageFont.FreeTypeFont:
     size = start_size
     while size > min_size:
@@ -71,71 +80,116 @@ def _fit_text(
     return _font(font_path, min_size)
 
 
-async def _download_avatar_bytes(avatar_url: str) -> bytes | None:
+def _wrap_two_lines(
+    draw: ImageDraw.ImageDraw,
+    text: str,
+    font_path: str,
+    max_width: int,
+    start_size: int,
+    min_size: int = 16,
+) -> tuple[ImageFont.FreeTypeFont, list[str]]:
+    """Co cỡ chữ dần tới khi tên vừa trong TỐI ĐA 2 dòng (ngắt theo từ)."""
+    size = start_size
+    words = text.split()
+    while size >= min_size:
+        font = _font(font_path, size)
+        lines: list[str] = []
+        current = ""
+        for word in words:
+            trial = f"{current} {word}".strip()
+            bbox = draw.textbbox((0, 0), trial, font=font)
+            if bbox[2] - bbox[0] <= max_width or not current:
+                current = trial
+            else:
+                lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
+        if len(lines) <= 2:
+            return font, lines
+        size -= 2
+    # Cỡ nhỏ nhất vẫn không vừa 2 dòng -> cắt bớt dòng 2 kèm "…"
+    font = _font(font_path, min_size)
+    return font, lines[:2]
+
+
+async def _download_avatar_bytes(avatar_url: str) -> tuple[bytes | None, str]:
     try:
         async with aiohttp.ClientSession() as session:
             async with session.get(avatar_url, timeout=10) as resp:
                 if resp.status == 200:
-                    return await resp.read()
-    except Exception:
-        return None
-    return None
+                    return await resp.read(), ""
+                return None, f"http_{resp.status}"
+    except Exception as e:
+        return None, f"{type(e).__name__}: {e}"
+
+
+def _build_avatar_mask() -> Image.Image:
+    """Mask hình chữ nhật mép trái cắt chéo, khớp vùng avatar bên phải card."""
+    mask = Image.new("L", (_W, _H), 0)
+    mdraw = ImageDraw.Draw(mask)
+    polygon = [
+        (_AVATAR_LEFT_TOP, _AVATAR_TOP),
+        (_AVATAR_RIGHT, _AVATAR_TOP),
+        (_AVATAR_RIGHT, _AVATAR_BOTTOM),
+        (_AVATAR_LEFT_BOTTOM, _AVATAR_BOTTOM),
+    ]
+    mdraw.polygon(polygon, fill=255)
+    return mask
 
 
 async def render_welcome_card(
     display_name: str,
     avatar_url: str,
     member_number: int,
-) -> io.BytesIO:
-    """Render welcome card PNG, trả về BytesIO sẵn sàng gửi qua discord.File.
+) -> tuple[io.BytesIO, str]:
+    """Render welcome card PNG, trả về (BytesIO sẵn sàng gửi qua discord.File,
+    lý_do_lỗi_avatar). lý_do_lỗi_avatar rỗng "" nếu avatar tải/dán thành công.
 
     member_number: số thứ tự thành viên (vd 10797 -> hiện '#10797')."""
 
     card = Image.open(_BG_PATH).convert("RGBA")
     if card.size != (_W, _H):
         card = card.resize((_W, _H))
-    draw = ImageDraw.Draw(card)
 
-    # --- Số thứ tự thành viên: to, ngay dưới "Con gà thứ:" ---
-    number_font = _font(_FONT_BOLD_PATH, 44)
-    number_text = f"#{member_number}"
-    draw.text((40, 132), number_text, font=number_font, fill=_WHITE)
-
-    # --- Tên hiển thị: ngay dưới số thứ tự, tự co cỡ nếu dài ---
-    name_max_width = _W - 40 - 40
-    name_font = _fit_text(draw, display_name, _FONT_BOLD_PATH, name_max_width, start_size=30, min_size=18)
-    draw.text((40, 190), display_name, font=name_font, fill=_WHITE)
-
-    # --- Avatar tròn, viền trắng mảnh, góc phải ---
-    avatar_bytes = await _download_avatar_bytes(avatar_url)
-    avatar_img: Image.Image | None = None
+    # --- Avatar chữ nhật chéo, dán TRƯỚC chữ để số/tên đè lên trên nó ---
+    avatar_bytes, avatar_err = await _download_avatar_bytes(avatar_url)
     if avatar_bytes:
         try:
             avatar_img = Image.open(io.BytesIO(avatar_bytes)).convert("RGB")
-        except Exception:
-            avatar_img = None
+            box_w = _AVATAR_RIGHT - min(_AVATAR_LEFT_TOP, _AVATAR_LEFT_BOTTOM)
+            box_h = _AVATAR_BOTTOM - _AVATAR_TOP
+            fitted = ImageOps.fit(avatar_img, (box_w, box_h))
+            layer = Image.new("RGBA", (_W, _H), (0, 0, 0, 0))
+            layer.paste(fitted, (min(_AVATAR_LEFT_TOP, _AVATAR_LEFT_BOTTOM), _AVATAR_TOP))
+            mask = _build_avatar_mask()
+            card = Image.composite(layer, card, mask)
+        except Exception as e:
+            avatar_err = f"decode lỗi: {type(e).__name__}: {e}"
+    # Nếu tải avatar lỗi, card vẫn hiển thị đầy đủ số + tên (không để trống
+    # loang lổ) - chỉ đơn giản là thiếu ảnh avatar, không crash toàn bộ card.
+    # avatar_err được trả kèm để caller (discord_bot.py) log lý do cụ thể.
 
-    ring_pad = 4
-    ax0 = _AVATAR_CENTER[0] - _AVATAR_SIZE // 2
-    ay0 = _AVATAR_CENTER[1] - _AVATAR_SIZE // 2
-    ring_box = (
-        ax0 - ring_pad,
-        ay0 - ring_pad,
-        ax0 + _AVATAR_SIZE + ring_pad,
-        ay0 + _AVATAR_SIZE + ring_pad,
+    draw = ImageDraw.Draw(card)
+
+    text_max_width = _TEXT_RIGHT_MAX - _TEXT_LEFT
+
+    # --- Số thứ tự: to, mờ (watermark), phía dưới cùng khối chữ ---
+    number_font = _font(_FONT_BOLD_PATH, 46)
+    number_text = f"#{member_number}"
+    number_y = 145
+    draw.text((_TEXT_LEFT, number_y), number_text, font=number_font, fill=_NUMBER_GREY)
+
+    # --- Tên hiển thị: đậm, trắng, đè lên trên số, tối đa 2 dòng ---
+    name_font, name_lines = _wrap_two_lines(
+        draw, display_name, _FONT_BOLD_PATH, text_max_width, start_size=26, min_size=16
     )
-    draw.ellipse(ring_box, fill=_WHITE)
-
-    if avatar_img is not None:
-        try:
-            fitted = ImageOps.fit(avatar_img, (_AVATAR_SIZE, _AVATAR_SIZE))
-            avatar_mask = Image.new("L", (_AVATAR_SIZE, _AVATAR_SIZE), 0)
-            ImageDraw.Draw(avatar_mask).ellipse([(0, 0), (_AVATAR_SIZE, _AVATAR_SIZE)], fill=255)
-            card.paste(fitted, (ax0, ay0), avatar_mask)
-        except Exception:
-            pass
+    line_height = name_font.size + 4
+    name_y = number_y + 28
+    for i, line in enumerate(name_lines):
+        draw.text((_TEXT_LEFT, name_y + i * line_height), line, font=name_font, fill=_WHITE)
 
     buf = io.BytesIO()
     card.convert("RGB").save(buf, format="PNG")
     buf.seek(0)
-    return buf
+    return buf, avatar_err
