@@ -66,6 +66,7 @@ from config import (
     MEMBER_MILESTONE_STEP,
     CONFESSION_CHANNEL_ID,
     CONFESSION_COOLDOWN_SEC,
+    WELCOME_CHANNEL_ID,
     log,
 )
 from tiktok_client import TikTokClient
@@ -74,6 +75,7 @@ import economy
 import features
 import ai_chat
 import level_card
+import welcome_card
 import versioning
 
 # ---------------------------------------------------------------------------
@@ -347,6 +349,7 @@ async def before_sync_identity_loop():
 @tasks.loop(seconds=60)
 async def daily_loop():
     await features.maybe_post_daily(client, DAILY_CHANNEL_ID)
+    await features.maybe_repost_daily_idle(client, DAILY_CHANNEL_ID)
 
 
 @daily_loop.before_loop
@@ -829,6 +832,41 @@ async def _maybe_announce_member_milestone(guild: discord.Guild) -> None:
         pass
 
 
+async def _send_welcome_card(member: discord.Member) -> None:
+    """Gửi ảnh welcome card + tin nhắn chào ở WELCOME_CHANNEL_ID khi có
+    thành viên mới (không tính bot). Số thứ tự thành viên lấy từ
+    member_count hiện tại của guild ngay lúc join."""
+    channel = member.guild.get_channel(WELCOME_CHANNEL_ID) or client.get_channel(WELCOME_CHANNEL_ID)
+    if channel is None:
+        return
+
+    try:
+        buf = await welcome_card.render_welcome_card(
+            display_name=member.display_name,
+            avatar_url=member.display_avatar.replace(size=256).url,
+            member_number=member.guild.member_count,
+        )
+        file = discord.File(buf, filename="welcome.png")
+    except Exception as e:
+        log.warning("Render welcome card lỗi: %s", e)
+        file = None
+
+    text = (
+        f"# Chào mừng bradar {member.mention} đã đến với server của Delta Mick <:mango:1529287058072408195>\n\n"
+        f"- Hãy xem qua <id:guide> và đọc luật nhé, nhớ tích cực chat nhiều vào để không bị ghẻ bi 🗿\n\n"
+        f"- Và đương nhiên là tôi cũng sẽ khá thất vọng nếu các bradar chưa follow kênh "
+        f"[***Delta Mick***](https://www.tiktok.com/@tahnuyo_0?_r=1&_t=ZS-993g64YqnBd) đấy <:sad:1531310182016094328>"
+    )
+
+    try:
+        if file is not None:
+            await channel.send(content=text, file=file)
+        else:
+            await channel.send(content=text)
+    except Exception as e:
+        log.warning("Gửi welcome card lỗi: %s", e)
+
+
 @client.event
 async def on_member_join(member: discord.Member):
     if member.guild.id != DISCORD_GUILD_ID:
@@ -838,6 +876,8 @@ async def on_member_join(member: discord.Member):
 
     if member.bot:
         return
+
+    _fire_and_forget(_send_welcome_card(member), "Gửi welcome card lỗi")
 
     old_uses = await _refresh_invite_cache(member.guild)
     new_uses = _invite_uses_cache.get(member.guild.id, {})
@@ -965,6 +1005,11 @@ async def on_message(message: discord.Message):
 
     _maybe_grant_xp(message)
     _mark_active_today(message.author.id)
+
+    # Daily: đếm tin nhắn trong kênh Daily để tự bump lại nếu bị trôi mất
+    # giữa dòng chat đông người (xem features.on_daily_channel_message).
+    if message.channel.id == DAILY_CHANNEL_ID:
+        _fire_and_forget(features.on_daily_channel_message(client, DAILY_CHANNEL_ID), "Bump Daily lỗi")
 
 
 async def _check_first_message_achievement(message: discord.Message):

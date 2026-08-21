@@ -29,8 +29,6 @@ import db
 from config import (
     GROQ_API_KEY,
     GROQ_MODEL,
-    GEMINI_API_KEY,
-    GEMINI_MODEL,
     TAVILY_API_KEY,
     AI_LEARN_MIN_WORD_LEN,
     AI_LEARN_MIN_MEMBERS,
@@ -38,7 +36,6 @@ from config import (
 )
 
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 TAVILY_URL = "https://api.tavily.com/search"
 
 SYSTEM_PROMPT = (
@@ -168,61 +165,14 @@ _SEARCH_TRIGGER_RE = re.compile(
 
 def needs_web_search(text: str) -> bool:
     """True nếu câu hỏi có vẻ cần thông tin thực tế/thời sự -> nên bật
-    search_answer (Gemini + tool tìm web) thay vì model chat thường."""
+    tìm kiếm web (Tavily) thay vì model chat thường."""
     return bool(_SEARCH_TRIGGER_RE.search(text or ""))
 
 
-async def search_answer(system_prompt: str, user_text: str) -> tuple[str | None, bool, str]:
-    """Gọi Gemini với tool "google_search" tích hợp sẵn (Gemini tự quyết
-    định có cần search hay không tuỳ câu hỏi). Trả về (nội dung, ok, lý_do) -
-    lý_do là mã lỗi ngắn gọn (vd "http_403: ...") để hiện luôn cho admin
-    thấy trong Discord, khỏi phải mò log Render mỗi lần lỗi."""
-    if not GEMINI_API_KEY:
-        return None, False, "thiếu GEMINI_API_KEY"
-    url = GEMINI_URL.format(model=GEMINI_MODEL)
-    headers = {"x-goog-api-key": GEMINI_API_KEY, "Content-Type": "application/json"}
-    payload = {
-        "system_instruction": {"parts": [{"text": system_prompt}]},
-        "contents": [{"role": "user", "parts": [{"text": user_text}]}],
-        "tools": [{"google_search": {}}],
-        "generationConfig": {"temperature": 0.8, "maxOutputTokens": 800},
-    }
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(url, headers=headers, json=payload, timeout=45) as resp:
-                if resp.status != 200:
-                    body = await resp.text()
-                    log.warning("Gemini API lỗi %s: %s", resp.status, body[:500])
-                    # Rút gọn message lỗi của Google (thường có field error.message)
-                    # để nhét vừa vào 1 dòng Discord thay vì cả cục JSON dài.
-                    short = body[:200]
-                    try:
-                        err_json = json.loads(body)
-                        short = err_json.get("error", {}).get("message", short)[:200]
-                    except Exception:
-                        pass
-                    return None, False, f"http_{resp.status}: {short}"
-                data = await resp.json()
-                candidates = data.get("candidates") or []
-                if not candidates:
-                    block_reason = (data.get("promptFeedback") or {}).get("blockReason")
-                    log.warning("Gemini API không trả candidate nào (block_reason=%s)", block_reason)
-                    return None, False, f"bị chặn nội dung (blockReason={block_reason})" if block_reason else "không có candidate trả về"
-                parts = candidates[0].get("content", {}).get("parts", [])
-                text = "".join(p.get("text", "") for p in parts).strip()
-                if not text:
-                    finish_reason = candidates[0].get("finishReason")
-                    return None, False, f"nội dung rỗng (finishReason={finish_reason})"
-                return text, True, ""
-    except Exception as e:
-        log.warning("Gọi Gemini lỗi: %s", e)
-        return None, False, f"lỗi mạng/timeout: {e}"
-
-
 async def _tavily_search_answer(system_prompt: str, user_text: str) -> tuple[str | None, bool, str]:
-    """Fallback khi Gemini lỗi/hết quota: lấy kết quả tìm kiếm từ Tavily rồi
-    nhờ Groq tóm tắt lại thành câu trả lời tự nhiên. Trả về cùng định dạng
-    (nội dung, ok, lý_do) như search_answer() để _reply_with_search dùng chung."""
+    """Lấy kết quả tìm kiếm từ Tavily rồi nhờ Groq tóm tắt lại thành câu trả
+    lời tự nhiên. Trả về (nội dung, ok, lý_do) - lý_do là mã lỗi ngắn gọn để
+    hiện luôn cho admin thấy trong Discord, khỏi phải mò log Render."""
     if not TAVILY_API_KEY:
         return None, False, "thiếu TAVILY_API_KEY"
 
@@ -295,15 +245,7 @@ async def _reply_with_search(message: discord.Message, system_prompt: str, user_
     except Exception as e:
         log.warning("Gửi thông báo đang tìm kiếm lỗi: %s", e)
 
-    result, ok, reason = await search_answer(system_prompt, user_text)
-    if not ok:
-        log.warning("_reply_with_search: search_answer (Gemini) thất bại (%s) - thử fallback Tavily", reason)
-        fallback_result, fallback_ok, fallback_reason = await _tavily_search_answer(system_prompt, user_text)
-        if fallback_ok:
-            result, ok, reason = fallback_result, True, ""
-        else:
-            log.warning("_reply_with_search: fallback Tavily cũng thất bại (%s)", fallback_reason)
-            reason = f"{reason} | fallback Tavily: {fallback_reason}"
+    result, ok, reason = await _tavily_search_answer(system_prompt, user_text)
 
     if ok and result:
         final_text = _sanitize_ai_output(result)
@@ -331,11 +273,11 @@ async def _reply_with_search(message: discord.Message, system_prompt: str, user_
 
 async def generate_auto_message() -> str | None:
     """Sinh 1 câu bot tự chat vào kênh, không cần user hỏi. Khoảng 35% số lần
-    sẽ nhờ Gemini tìm 1 tin/sự kiện thời sự thật để mở lời cho có tính "đọc
-    tin" thay vì chỉ bịa chuyện phiếm; nếu Gemini lỗi/hết quota thì ÂM THẦM
+    sẽ nhờ Tavily tìm 1 tin/sự kiện thời sự thật để mở lời cho có tính "đọc
+    tin" thay vì chỉ bịa chuyện phiếm; nếu Tavily lỗi/hết quota thì ÂM THẦM
     rớt về câu bịa bình thường (auto-chat không cần báo lỗi cho ai thấy)."""
     if random.random() < 0.35:
-        result, ok, reason = await search_answer(
+        result, ok, reason = await _tavily_search_answer(
             SYSTEM_PROMPT,
             "Tìm 1 tin tức/sự kiện đang hot, thú vị, không nhạy cảm (không chính trị "
             "gây tranh cãi, không bạo lực, không tin giả) hôm nay, rồi viết 1 câu ngắn "
@@ -344,7 +286,7 @@ async def generate_auto_message() -> str | None:
         )
         if ok and result:
             return _sanitize_ai_output(result)
-        log.warning("generate_auto_message: search_answer thất bại (%s), rớt về câu bịa thường", reason)
+        log.warning("generate_auto_message: tìm kiếm Tavily thất bại (%s), rớt về câu bịa thường", reason)
 
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},

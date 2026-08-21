@@ -82,6 +82,13 @@ DAILY_DECAY_RATE = float(os.environ.get("DAILY_DECAY_RATE", "0.10"))  # giảm 1
 DAILY_MIN_REWARD = int(os.environ.get("DAILY_MIN_REWARD", "15"))
 DAILY_WINDOW_HOURS = int(os.environ.get("DAILY_WINDOW_HOURS", "12"))  # hết hạn lúc 12h trưa
 
+# Đăng lại (bump) tin Daily nếu bị trôi mất giữa dòng chat đông người: sau
+# DAILY_REPOST_AFTER_MESSAGES tin nhắn mới trong kênh Daily kể từ lần đăng
+# gần nhất, HOẶC nếu đã DAILY_REPOST_IDLE_HOURS giờ trôi qua mà chưa ai bump
+# lại (kênh vắng, tin Daily coi như đã bị quên) - miễn còn trong hạn nhận.
+DAILY_REPOST_AFTER_MESSAGES = int(os.environ.get("DAILY_REPOST_AFTER_MESSAGES", "10"))
+DAILY_REPOST_IDLE_HOURS = float(os.environ.get("DAILY_REPOST_IDLE_HOURS", "3"))
+
 # Xác suất khi nhận Daily sẽ gặp 1 câu hỏi phụ (toán/câu đố dân gian) thay vì
 # nhận thẳng - trả lời đúng mới được thưởng. 0 = tắt hẳn tính năng này.
 DAILY_CHALLENGE_CHANCE = float(os.environ.get("DAILY_CHALLENGE_CHANCE", "0.35"))
@@ -147,6 +154,7 @@ BOOST_CHANNEL_ID = int(os.environ.get("BOOST_CHANNEL_ID", "0") or 0) or 15312915
 # discord_bot.py và create_milestone_code()/redeem_milestone_code() trong
 # features.py ---
 MEMBER_MILESTONE_CHANNEL_ID = int(os.environ.get("MEMBER_MILESTONE_CHANNEL_ID", "0") or 0) or 1528556249178706071
+WELCOME_CHANNEL_ID = int(os.environ.get("WELCOME_CHANNEL_ID", "0") or 0) or 1528556700653719734
 MEMBER_MILESTONE_STEP = int(os.environ.get("MEMBER_MILESTONE_STEP", "50"))  # mốc mỗi 50 member
 MEMBER_MILESTONE_CODE_MAX_USES = int(os.environ.get("MEMBER_MILESTONE_CODE_MAX_USES", "50"))
 MEMBER_MILESTONE_CODE_TTL_SEC = int(os.environ.get("MEMBER_MILESTONE_CODE_TTL_SEC", str(10 * 3600)))
@@ -175,15 +183,11 @@ QUEST_INVITE_MAX = int(os.environ.get("QUEST_INVITE_MAX", "10"))
 # --- AI Chat (Groq) ---
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL = os.environ.get("GROQ_MODEL", "openai/gpt-oss-120b")
-# Gemini dùng riêng cho các câu cần tìm kiếm web thật (xem ai_chat.search_answer,
-# tool "google_search" tích hợp sẵn của Gemini) - Groq không có tool search
-# đủ ổn định/miễn phí bằng nên tách hẳn ra provider khác cho phần này.
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.5-flash")
 
-# Fallback tìm kiếm web khi Gemini lỗi/hết quota (429...) - dùng Tavily lấy
-# kết quả search rồi nhờ Groq tóm tắt lại. Free tier Tavily: ~1000 credit/tháng.
-# Lấy key tại https://app.tavily.com
+# Tìm kiếm web thật (xem ai_chat._tavily_search_answer) dùng Tavily lấy kết
+# quả search rồi nhờ Groq tóm tắt lại - Groq không có tool search đủ ổn
+# định/miễn phí nên tách hẳn ra provider riêng cho phần này.
+# Free tier Tavily: ~1000 credit/tháng. Lấy key tại https://app.tavily.com
 TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "")
 AI_AUTO_CHAT_INTERVAL_SEC = int(os.environ.get("AI_AUTO_CHAT_INTERVAL_SEC", str(15 * 60)))
 # Chỉ tự nhắn nếu có người thật (không phải bot) chat trong kênh trong khoảng thời gian này

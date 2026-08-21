@@ -40,6 +40,8 @@ from config import (
     DAILY_DECAY_RATE,
     DAILY_MIN_REWARD,
     DAILY_WINDOW_HOURS,
+    DAILY_REPOST_AFTER_MESSAGES,
+    DAILY_REPOST_IDLE_HOURS,
     DAILY_CHALLENGE_CHANCE,
     DAILY_CHALLENGE_BONUS_PERCENT,
     DAILY_STREAK_HISTORY_LEN,
@@ -742,8 +744,13 @@ async def finalize_daily_streaks() -> None:
             log.warning("Chốt chuỗi Daily cho user %s lỗi: %s", user_id_str, e)
 
 
+_daily_messages_since_post = 0
+_daily_repost_lock = asyncio.Lock()
+
+
 async def maybe_post_daily(client: discord.Client, channel_id: int) -> None:
     """Gọi mỗi phút từ vòng lặp; tự đăng embed đúng lúc 0h VN nếu chưa đăng hôm nay."""
+    global _daily_messages_since_post
     now = vn_now()
     today = now.strftime("%Y-%m-%d")
 
@@ -762,8 +769,92 @@ async def maybe_post_daily(client: discord.Client, channel_id: int) -> None:
             return
 
     await finalize_daily_streaks()
-    await channel.send(view=DailyClaimView())
-    await db.save_daily_state({"date": today, "reset_at_epoch": int(time.time())})
+    msg = await channel.send(view=DailyClaimView())
+    _daily_messages_since_post = 0
+    await db.save_daily_state({
+        "date": today,
+        "reset_at_epoch": int(time.time()),
+        "message_id": msg.id,
+        "last_post_ts": time.time(),
+    })
+
+
+async def _repost_daily(client: discord.Client, channel_id: int, daily_state: dict) -> None:
+    """Đăng lại (bump) tin Daily lên cuối kênh - xoá tin cũ nếu còn xoá được,
+    rồi gửi tin mới + cập nhật message_id/last_post_ts. Dùng khi tin Daily cũ
+    bị trôi mất giữa dòng chat đông người, hoặc kênh im ắng quá lâu."""
+    global _daily_messages_since_post
+    channel = client.get_channel(channel_id)
+    if channel is None:
+        try:
+            channel = await client.fetch_channel(channel_id)
+        except Exception:
+            return
+
+    old_msg_id = daily_state.get("message_id")
+    if old_msg_id:
+        try:
+            old_msg = await channel.fetch_message(int(old_msg_id))
+            await old_msg.delete()
+        except Exception:
+            pass  # tin cũ có thể đã bị xoá tay/trôi quá xa - bỏ qua, không quan trọng
+
+    try:
+        new_msg = await channel.send(view=DailyClaimView())
+    except Exception as e:
+        log.warning("Đăng lại Daily lỗi: %s", e)
+        return
+
+    _daily_messages_since_post = 0
+    await db.save_daily_state({"message_id": new_msg.id, "last_post_ts": time.time()})
+
+
+async def on_daily_channel_message(client: discord.Client, channel_id: int) -> None:
+    """Gọi từ on_message mỗi khi có tin nhắn mới TRONG kênh Daily - đếm dồn,
+    hễ đủ DAILY_REPOST_AFTER_MESSAGES tin thì bump lại Daily ngay (miễn còn
+    trong hạn nhận và Daily hôm nay đã đăng)."""
+    global _daily_messages_since_post
+    now = vn_now()
+    if now.hour >= DAILY_WINDOW_HOURS:
+        return  # đã hết hạn nhận Daily hôm nay, bump làm gì nữa
+
+    daily_state = await db.get_daily_state()
+    if daily_state.get("date") != vn_today_str():
+        return  # Daily hôm nay chưa đăng - không có gì để bump
+
+    _daily_messages_since_post += 1
+    if _daily_messages_since_post < DAILY_REPOST_AFTER_MESSAGES:
+        return
+
+    async with _daily_repost_lock:
+        if _daily_messages_since_post < DAILY_REPOST_AFTER_MESSAGES:
+            return  # 1 tin nhắn khác vừa bump rồi, khỏi bump trùng
+        await _repost_daily(client, channel_id, daily_state)
+
+
+async def maybe_repost_daily_idle(client: discord.Client, channel_id: int) -> None:
+    """Gọi mỗi phút từ vòng lặp (cùng chỗ với maybe_post_daily) - nếu kênh
+    quá im ắng (không đủ tin để on_daily_channel_message tự bump) mà đã
+    DAILY_REPOST_IDLE_HOURS giờ trôi qua kể từ lần đăng/bump gần nhất, tự
+    đăng lại 1 lần để nhắc, tránh Daily bị quên lãng cả buổi."""
+    now = vn_now()
+    if now.hour >= DAILY_WINDOW_HOURS:
+        return
+
+    daily_state = await db.get_daily_state()
+    if daily_state.get("date") != vn_today_str():
+        return
+
+    last_post_ts = daily_state.get("last_post_ts", 0)
+    if time.time() - last_post_ts < DAILY_REPOST_IDLE_HOURS * 3600:
+        return
+
+    async with _daily_repost_lock:
+        daily_state = await db.get_daily_state()  # đọc lại phòng vừa bị bump ở nhánh khác
+        last_post_ts = daily_state.get("last_post_ts", 0)
+        if time.time() - last_post_ts < DAILY_REPOST_IDLE_HOURS * 3600:
+            return
+        await _repost_daily(client, channel_id, daily_state)
 
 
 # ===========================================================================
