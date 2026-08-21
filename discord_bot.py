@@ -18,6 +18,7 @@ JS-VM hoặc dịch vụ trả phí). Chỉ còn giữ thông báo LIVE, vẫn d
 """
 
 import asyncio
+import math
 import random
 import secrets
 import time
@@ -180,7 +181,11 @@ def get_bot_info() -> dict:
 
     guild_count = len(client.guilds)
     member_count = sum(g.member_count or 0 for g in client.guilds if g.member_count)
-    latency_ms = round(client.latency * 1000) if client.latency and client.latency == client.latency else None
+    latency_ms = (
+        round(client.latency * 1000)
+        if client.latency is not None and math.isfinite(client.latency)
+        else None
+    )
 
     return {
         "name": user.name,
@@ -827,7 +832,7 @@ async def _maybe_announce_member_milestone(guild: discord.Guild) -> None:
         await channel.send(
             f"Yoo, ae chúng ta có **{member_count}** member rồi và tôi sẽ tạo code "
             f"`{info['code']}` cho các ae, giới hạn **{info['max_uses']}** người nhập nhé!😛\n"
-            f"Dùng lệnh `/nhap-code` để nhập. Hết hạn trong **{ttl_hours}H**."
+            f"Dùng lệnh `/code` để nhập. Hết hạn trong **{ttl_hours}H**."
         )
     except Exception:
         pass
