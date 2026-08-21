@@ -125,17 +125,41 @@ async def _download_avatar_bytes(avatar_url: str) -> tuple[bytes | None, str]:
 
 
 def _build_avatar_mask() -> Image.Image:
-    """Mask hình chữ nhật mép trái cắt chéo, khớp vùng avatar bên phải card."""
-    mask = Image.new("L", (_W, _H), 0)
-    mdraw = ImageDraw.Draw(mask)
+    """Mask hình chữ nhật mép trái cắt chéo, khớp vùng avatar bên phải card.
+    Vẽ ở độ phân giải gấp đôi rồi thu nhỏ lại (supersampling) để cạnh chéo
+    mượt, không bị răng cưa/lem như vẽ polygon trực tiếp ở kích thước gốc."""
+    scale = 4
+    big = Image.new("L", (_W * scale, _H * scale), 0)
+    mdraw = ImageDraw.Draw(big)
     polygon = [
-        (_AVATAR_LEFT_TOP, _AVATAR_TOP),
-        (_AVATAR_RIGHT, _AVATAR_TOP),
-        (_AVATAR_RIGHT, _AVATAR_BOTTOM),
-        (_AVATAR_LEFT_BOTTOM, _AVATAR_BOTTOM),
+        (_AVATAR_LEFT_TOP * scale, _AVATAR_TOP * scale),
+        (_AVATAR_RIGHT * scale, _AVATAR_TOP * scale),
+        (_AVATAR_RIGHT * scale, _AVATAR_BOTTOM * scale),
+        (_AVATAR_LEFT_BOTTOM * scale, _AVATAR_BOTTOM * scale),
     ]
     mdraw.polygon(polygon, fill=255)
-    return mask
+    return big.resize((_W, _H), Image.LANCZOS)
+
+
+def _render_slanted_text(text: str, font: ImageFont.FreeTypeFont, color: tuple[int, int, int]) -> Image.Image:
+    """Vẽ text rồi nghiêng nhẹ bằng shear transform (giả italic) - font
+    DejaVu Sans-Bold bundle sẵn không có bản in nghiêng thật, nên đây là cách
+    gần nhất với style chữ nghiêng của mẫu tham khảo mà không cần thêm font."""
+    bbox = font.getbbox(text)
+    pad = 10
+    tw = bbox[2] - bbox[0] + pad * 2
+    th = bbox[3] - bbox[1] + pad * 2
+    layer = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
+    ImageDraw.Draw(layer).text((pad - bbox[0], pad - bbox[1]), text, font=font, fill=color)
+
+    shear = 0.18
+    sheared = layer.transform(
+        (tw + int(th * shear), th),
+        Image.AFFINE,
+        (1, -shear, th * shear, 0, 1, 0),
+        resample=Image.BICUBIC,
+    )
+    return sheared
 
 
 async def render_welcome_card(
@@ -174,22 +198,23 @@ async def render_welcome_card(
 
     text_max_width = _TEXT_RIGHT_MAX - _TEXT_LEFT
 
-    # --- Số thứ tự: to, mờ (watermark), phía dưới cùng khối chữ ---
-    number_font = _font(_FONT_BOLD_PATH, 46)
+    # --- Số thứ tự: to, mờ (watermark) ---
+    number_font = _font(_FONT_BOLD_PATH, 44)
     number_text = f"#{member_number}"
-    number_y = 145
+    number_y = 128
     draw.text((_TEXT_LEFT, number_y), number_text, font=number_font, fill=_NUMBER_GREY)
 
-    # --- Tên hiển thị: đậm, trắng, đè lên trên số, tối đa 2 dòng ---
-    name_font, name_lines = _wrap_two_lines(
-        draw, display_name, _FONT_BOLD_PATH, text_max_width, start_size=26, min_size=16
-    )
-    line_height = name_font.size + 4
-    name_y = number_y + 28
-    for i, line in enumerate(name_lines):
-        draw.text((_TEXT_LEFT, name_y + i * line_height), line, font=name_font, fill=_WHITE)
+    # --- Tên hiển thị: đậm, trắng, DÒNG RIÊNG ngay dưới số (không đè lên
+    # nhau, giống mẫu tham khảo) ---
+    name_bbox_font = _fit_text(draw, display_name, _FONT_BOLD_PATH, text_max_width, start_size=26, min_size=15)
+    name_y = number_y + 62
+    name_slanted = _render_slanted_text(display_name, name_bbox_font, _WHITE)
+    card.alpha_composite(name_slanted, (_TEXT_LEFT, name_y))
 
     buf = io.BytesIO()
-    card.convert("RGB").save(buf, format="PNG")
+    # Giữ nguyên RGBA (không convert("RGB")) để Discord hiển thị đúng góc bo
+    # tròn trong suốt của khung nền - convert("RGB") trước đây làm lộ màu
+    # "ma" ở vùng alpha=0 (RGB cũ giữ nguyên dù trong suốt) thành nền đặc.
+    card.save(buf, format="PNG")
     buf.seek(0)
     return buf, avatar_err
