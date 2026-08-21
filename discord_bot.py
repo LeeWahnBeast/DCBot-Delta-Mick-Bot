@@ -894,7 +894,9 @@ async def _assign_bot_role(member: discord.Member) -> None:
 
 @client.event
 async def on_member_join(member: discord.Member):
+    log.info("on_member_join fired: %s (bot=%s) guild=%s", member, member.bot, member.guild.id)
     if member.guild.id != DISCORD_GUILD_ID:
+        log.warning("on_member_join: guild %s khác DISCORD_GUILD_ID cấu hình (%s) - bỏ qua toàn bộ xử lý", member.guild.id, DISCORD_GUILD_ID)
         return
 
     _fire_and_forget(_maybe_announce_member_milestone(member.guild), "Thông báo mốc thành viên lỗi")
