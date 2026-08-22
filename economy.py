@@ -66,14 +66,33 @@ async def add_mick(user_id: int, amount: int) -> int | float:
     Có lock theo user_id để 2 request cùng lúc không đọc/ghi đè lên nhau.
 
     Chủ bot (BOT_OWNER_ID) có MICK vô hạn: không bao giờ bị trừ hết, trả về
-    INFINITE (hiển thị "∞" ở embed/web) mà không cần ghi DB."""
+    INFINITE (hiển thị "∞" ở embed/web) mà không cần ghi DB.
+
+    DeltaX (/mick-shop): nếu user đang sở hữu item còn hạn và amount > 0
+    (chỉ nhân MICK KIẾM ĐƯỢC, không nhân khi bị trừ tiền vd cược thua/chuyển
+    khoản), nhân thêm hệ số ngẫu nhiên đã chốt lúc mua (multiplier lưu sẵn
+    trong shop_purchases, không random lại mỗi lần cộng)."""
     if is_owner(user_id):
         return INFINITE
+    if amount > 0:
+        amount = await _apply_deltax_multiplier(user_id, amount)
     async with user_lock(user_id):
         user = await db.get_user(user_id)
         new_balance = max(0, user["mick"] + amount)
         await db.save_user(user_id, {"mick": new_balance})
         return new_balance
+
+
+async def _apply_deltax_multiplier(user_id: int, amount: int) -> int:
+    import time as _time
+    try:
+        purchase = await db.get_shop_purchase(user_id, "deltax")
+        if not purchase or purchase.get("expires_at", 0) <= _time.time():
+            return amount
+        mult = purchase.get("multiplier", 1.0)
+        return max(1, round(amount * mult))
+    except Exception:
+        return amount
 
 
 # ---------------------------------------------------------------------------

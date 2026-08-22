@@ -4,17 +4,18 @@ tĩnh (assets/welcome/welcome_bg.png, do admin tự thiết kế/đổi) và đ�
 
   - Avatar hình chữ nhật (không tròn), chiếm gần nửa phải card, mép trái cắt
     chéo (diagonal cut) - style lấy theo mẫu "Tohmcord" Mango gửi.
-  - Số thứ tự thành viên ("#12345") - to, MỜ (watermark xám nhạt), nằm phía
-    sau/trên phần đầu của tên.
-  - Tên hiển thị - đậm, trắng, đè lên ngay trên số, căn trái, tự xuống dòng
+  - Số thứ tự thành viên ("#12345") - to, MỜ (watermark xám nhạt), font
+    Poppins Bold tròn/mập, THẲNG ĐỨNG, nằm phía sau/trên phần đầu của tên.
+  - Tên hiển thị - đậm, trắng, đè lên ngay trên số, căn giữa, tự xuống dòng
     nếu dài (tối đa 2 dòng, tự co cỡ chữ nếu vẫn không vừa).
 
 Bố cục toạ độ đo theo khung nền 500x350 - nếu đổi nền khác kích thước khác
 thì cần chỉnh lại các hằng số toạ độ bên dưới.
 
-Font dùng chung DejaVu Sans bundle sẵn trong assets/fonts/ (giống
-level_card.py) để đảm bảo hiển thị đúng tiếng Việt có dấu trên mọi môi
-trường deploy (không phụ thuộc font hệ thống).
+Font: DejaVu Sans-Bold cho tên (đủ dấu tiếng Việt), Poppins Bold cho số
+thứ tự (tròn/mập hiện đại kiểu Montserrat/Baloo - Poppins bundle sẵn không
+có đủ 1 số dấu tiếng Việt như ệ/ữ/ễ nên chỉ dùng cho số, không dùng cho
+tên). Cả 2 đều bundle sẵn trong assets/fonts/.
 """
 
 from __future__ import annotations
@@ -73,25 +74,9 @@ def _font(path: str, size: int) -> ImageFont.FreeTypeFont:
     return ImageFont.truetype(path, size)
 
 
-# Bảng chuyển chữ thường la-tinh (không dấu) sang dạng "small caps" unicode
-# (ví dụ: "tro chuyen" -> "ᴛʀᴏ ᴄʜᴜʏᴇɴ") - chỉ áp dụng cho các ký tự cơ bản
-# a-z; chữ có dấu tiếng Việt (ví dụ ò, ệ, ữ...) KHÔNG có bản small-caps
-# unicode tương ứng nên giữ nguyên (DejaVu Sans vẫn render đúng, chỉ là
-# không "nhỏ hoa" được - đây là giới hạn của bảng Unicode, không phải lỗi).
-_SMALL_CAPS_MAP = {
-    "a": "ᴀ", "b": "ʙ", "c": "ᴄ", "d": "ᴅ", "e": "ᴇ", "f": "ꜰ", "g": "ɢ",
-    "h": "ʜ", "i": "ɪ", "j": "ᴊ", "k": "ᴋ", "l": "ʟ", "m": "ᴍ", "n": "ɴ",
-    "o": "ᴏ", "p": "ᴘ", "q": "ǫ", "r": "ʀ", "s": "s", "t": "ᴛ", "u": "ᴜ",
-    "v": "ᴠ", "w": "ᴡ", "x": "x", "y": "ʏ", "z": "ᴢ",
-}
-
-
-def _to_small_caps(text: str) -> str:
-    """Chuyển chữ thường la-tinh cơ bản sang dạng chữ hoa nhỏ (small caps)
-    unicode, kiểu "ᴛʀò-ᴄʜᴜʏệɴ" - giữ nguyên chữ hoa, số, dấu câu, và các
-    ký tự có dấu tiếng Việt (không có bản small-caps tương ứng trong bảng
-    Unicode)."""
-    return "".join(_SMALL_CAPS_MAP.get(ch.lower(), ch) if ch.islower() else ch for ch in text)
+# Font tên: DejaVu Sans-Bold (đủ dấu tiếng Việt). Font số: Poppins Bold
+# (tròn/mập, không cần dấu vì chỉ có chữ số + #) - cả 2 đều render THẲNG
+# ĐỨNG, không còn small-caps hay nghiêng giả nữa.
 
 
 def _fit_text(
@@ -247,53 +232,30 @@ def _build_avatar_mask() -> Image.Image:
     return big.resize((_W, _H), Image.LANCZOS)
 
 
-def _render_slanted_text(
+def _render_text(
     text: str,
     font: ImageFont.FreeTypeFont,
     color: tuple[int, int, int],
-    stretch_x: float = 1.0,
-    stretch_y: float = 1.0,
 ) -> Image.Image:
-    """Vẽ text rồi nghiêng nhẹ bằng shear transform (giả italic) - font
-    DejaVu Sans-Bold bundle sẵn không có bản in nghiêng thật, nên đây là cách
-    gần nhất với style chữ nghiêng của mẫu tham khảo mà không cần thêm font.
-
-    stretch_x/stretch_y: co giãn thêm sau khi nghiêng để bù việc font DejaVu
-    thấp/rộng hơn font gốc trong ảnh mẫu (ảnh mẫu dùng font đậm, cao, hẹp bề
-    ngang hơn nhiều) - đo tỉ lệ theo ảnh mẫu "Tohmcord" rồi áp vào đây."""
+    """Vẽ text thẳng đứng (không nghiêng/shear) - dùng font tròn/mập
+    (Poppins) trực tiếp để giữ nét chữ sạch, tránh hiệu ứng shear giả-nghiêng
+    trước đây làm chữ bị méo/rỗ cạnh khi render lại kích thước khác."""
     bbox = font.getbbox(text)
-    pad = 10
+    pad = 6
     tw = bbox[2] - bbox[0] + pad * 2
     th = bbox[3] - bbox[1] + pad * 2
     layer = Image.new("RGBA", (tw, th), (0, 0, 0, 0))
     ImageDraw.Draw(layer).text((pad - bbox[0], pad - bbox[1]), text, font=font, fill=color)
-
-    shear = -0.22
-    shear_pad = int(th * abs(shear))
-    sheared = layer.transform(
-        (tw + shear_pad, th),
-        Image.AFFINE,
-        (1, -shear, th * shear, 0, 1, 0),
-        resample=Image.BICUBIC,
-    )
-    if stretch_x != 1.0 or stretch_y != 1.0:
-        new_w = max(1, int(sheared.width * stretch_x))
-        new_h = max(1, int(sheared.height * stretch_y))
-        sheared = sheared.resize((new_w, new_h), Image.LANCZOS)
-    # Cắt sát viền trong suốt (pad thêm ở trên chỉ để shear không bị cắt góc)
-    # - nếu không crop, khoảng pad này cộng dồn vào chỗ trống bên dưới mỗi
-    # dòng chữ khi ghép nối (number -> tên -> ...), làm khoảng cách bị đẩy
-    # xa hơn hẳn so với ảnh mẫu.
-    ink_bbox = sheared.getbbox()
+    ink_bbox = layer.getbbox()
     if ink_bbox:
         margin = 3
         l, t, r, b = ink_bbox
         l = max(0, l - margin)
         t = max(0, t - margin)
-        r = min(sheared.width, r + margin)
-        b = min(sheared.height, b + margin)
-        sheared = sheared.crop((l, t, r, b))
-    return sheared
+        r = min(layer.width, r + margin)
+        b = min(layer.height, b + margin)
+        layer = layer.crop((l, t, r, b))
+    return layer
 
 
 async def render_welcome_card(
@@ -332,33 +294,24 @@ async def render_welcome_card(
 
     text_max_width = _TEXT_RIGHT_MAX - _TEXT_LEFT
 
-    # --- Số thứ tự: to, mờ (watermark), NGHIÊNG giống mẫu tham khảo ---
-    # Đo theo ảnh mẫu "Tohmcord" (500x350): số "#10797" chiếm x≈24-300,
-    # y≈128-208 (cao ~80px) -> co cỡ chữ tự động theo bề rộng khả dụng rồi
-    # nghiêng bằng _render_slanted_text (cùng kiểu với tên bên dưới).
-    # start_size cố định = cỡ vừa khít với số 6 chữ số kiểu "#10797" trong
-    # ảnh mẫu - KHÔNG để _fit_text phóng to hơn cho số ngắn (vd "#198"),
-    # chỉ co nhỏ lại khi số dài hơn 6 chữ số mới cần thu bớt.
+    # --- Số thứ tự: to, mờ (watermark), font Poppins Bold tròn/mập,
+    # THẲNG ĐỨNG (bỏ nghiêng giả trước đây làm chữ méo) ---
     number_text = f"#{member_number}"
-    number_font = _fit_text(draw, number_text, _FONT_NUMBER_PATH, text_max_width, start_size=48, min_size=30)
+    number_font = _fit_text(draw, number_text, _FONT_NUMBER_PATH, text_max_width, start_size=52, min_size=30)
     number_y = 138
-    # Font DejaVu thấp/rộng hơn nhiều so với font đậm-cao trong ảnh mẫu ->
-    # kéo cao thêm ~55% (đo theo "#10797" mẫu: cao ~97px trong khi DejaVu
-    # cỡ vừa khít bề rộng chỉ cao ~61px) để nhìn "dày/nghiêng" đúng kiểu.
-    number_slanted = _render_slanted_text(number_text, number_font, _NUMBER_GREY, stretch_x=1.0, stretch_y=1.0)
-    card.alpha_composite(number_slanted, (_TEXT_LEFT, number_y))
+    number_img = _render_text(number_text, number_font, _NUMBER_GREY)
+    card.alpha_composite(number_img, (_TEXT_LEFT, number_y))
 
-    # --- Tên hiển thị: đậm, trắng, CĂN GIỮA trong vùng chữ, ngay dưới số
-    # (đo theo mẫu: cách đáy số ~14-18px) - không còn canh trái như trước ---
-    name_font, name_lines = _wrap_two_lines(draw, _to_small_caps(display_name), _FONT_BOLD_PATH, text_max_width, start_size=22, min_size=15)
-    name_y = number_y + number_slanted.height + 8
-    line_gap = 4
+    # --- Tên hiển thị: đậm, trắng, font Poppins Medium tròn/mập (đủ dấu
+    # tiếng Việt qua DejaVu fallback), CĂN GIỮA, THẲNG ĐỨNG ---
+    name_font, name_lines = _wrap_two_lines(draw, display_name, _FONT_BOLD_PATH, text_max_width, start_size=24, min_size=15)
+    name_y = number_y + number_img.height + 10
+    line_gap = 6
     for line in name_lines:
-        # Cùng lý do như số: hẹp bớt bề ngang, cao thêm chút cho gần mẫu.
-        name_slanted = _render_slanted_text(line, name_font, _WHITE, stretch_x=0.85, stretch_y=1.2)
-        line_x = _TEXT_LEFT + max(0, (text_max_width - name_slanted.width) // 2)
-        card.alpha_composite(name_slanted, (line_x, name_y))
-        name_y += name_slanted.height + line_gap
+        name_img = _render_text(line, name_font, _WHITE)
+        line_x = _TEXT_LEFT + max(0, (text_max_width - name_img.width) // 2)
+        card.alpha_composite(name_img, (line_x, name_y))
+        name_y += name_img.height + line_gap
 
     buf = io.BytesIO()
     # Giữ nguyên RGBA (không convert("RGB")) để Discord hiển thị đúng góc bo

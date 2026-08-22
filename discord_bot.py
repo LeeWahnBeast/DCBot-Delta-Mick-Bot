@@ -69,11 +69,26 @@ from config import (
     CONFESSION_COOLDOWN_SEC,
     WELCOME_CHANNEL_ID,
     BOT_ROLE_ID,
+    SHOP_EXPIRY_CHECK_SEC,
     log,
 )
 from tiktok_client import TikTokClient
 import db
-import economy
+import games_shop
+from games_shop import (
+    start_emoji_riddle,
+    process_emoji_riddle,
+    start_tictactoe,
+    process_tictactoe,
+    _render_tictactoe,
+    start_horse_race,
+    start_slot_machine,
+    start_high_low,
+    process_high_low_guess,
+    start_minesweeper,
+    process_minesweeper,
+    _render_minesweeper,
+)
 import features
 import ai_chat
 import level_card
@@ -148,6 +163,8 @@ async def on_ready():
         daily_loop.start()
     if not business_tick_loop.is_running():
         business_tick_loop.start()
+    if not shop_expiry_loop.is_running():
+        shop_expiry_loop.start()
     if not ai_auto_chat_loop.is_running():
         ai_auto_chat_loop.start()
     if not voice_xp_loop.is_running():
@@ -379,6 +396,25 @@ async def business_tick_loop():
 
 @business_tick_loop.before_loop
 async def before_business_tick_loop():
+    await client.wait_until_ready()
+
+
+# ---------------------------------------------------------------------------
+# Vòng lặp: dọn item /mick-shop hết hạn (gỡ role Admin Trial, xoá hiệu ứng
+# Ronaldo Pasta/La Peace/DeltaX) - xem features.run_shop_expiry_tick.
+# ---------------------------------------------------------------------------
+
+
+@tasks.loop(seconds=SHOP_EXPIRY_CHECK_SEC)
+async def shop_expiry_loop():
+    try:
+        await features.run_shop_expiry_tick(client)
+    except Exception as e:
+        log.warning("Shop expiry tick lỗi: %s", e)
+
+
+@shop_expiry_loop.before_loop
+async def before_shop_expiry_loop():
     await client.wait_until_ready()
 
 
@@ -810,12 +846,27 @@ async def _get_or_create_invite_link(guild: discord.Guild, user: discord.abc.Use
     return f"https://discord.gg/{invite.code}"
 
 
+_milestone_announce_lock = asyncio.Lock()
+
+
 async def _maybe_announce_member_milestone(guild: discord.Guild) -> None:
     """Nhắn kèm code quà khi tổng số member vừa chạm mốc tròn
-    MEMBER_MILESTONE_STEP (mặc định 50) - vd 50, 100, 150 member..."""
+    MEMBER_MILESTONE_STEP (mặc định 50) - vd 50, 100, 150 member...
+
+    Chỉ tạo code cho 1 mốc ĐÚNG 1 LẦN DUY NHẤT trong lịch sử guild, dựa vào
+    mốc cao nhất đã lưu ở db.get_milestone_reached - tránh bug tạo code
+    trùng khi member_count dao động qua lại quanh mốc (vd đạt 200 -> có
+    người rời xuống 199 -> join lại lên 200 -> KHÔNG tạo code lần 2 vì mốc
+    200 đã được đánh dấu "đã xử lý" từ lần đầu)."""
     member_count = guild.member_count or 0
     if member_count <= 0 or member_count % MEMBER_MILESTONE_STEP != 0:
         return
+
+    async with _milestone_announce_lock:
+        highest_reached = await db.get_milestone_reached(guild.id)
+        if member_count <= highest_reached:
+            return
+        await db.save_milestone_reached(guild.id, member_count)
 
     channel = client.get_channel(MEMBER_MILESTONE_CHANNEL_ID)
     if channel is None:
@@ -1005,6 +1056,87 @@ _QUEST_TRIGGERS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Gia hạn /mick-shop qua tin nhắn thường: "GH {tên sản phẩm}" -> bot hỏi
+# xác nhận Y/N -> gõ Y thì trừ tiền + cộng giờ, gõ N thì huỷ. State tạm lưu
+# RAM theo (channel_id, user_id) vì chỉ cần sống trong vài giây chờ xác
+# nhận, không cần bền vững qua restart.
+# ---------------------------------------------------------------------------
+
+_pending_shop_extend: dict[tuple[int, int], dict] = {}
+_SHOP_EXTEND_CONFIRM_TTL_SEC = 60
+
+
+async def _handle_gh_command(message: discord.Message, content: str) -> bool:
+    """Xử lý tin nhắn bắt đầu bằng "GH " (gia hạn item) hoặc "Y"/"N" xác
+    nhận gia hạn đang chờ. Trả True nếu đã xử lý (để on_message dừng sớm,
+    không chạy tiếp các logic khác không liên quan)."""
+    key = (message.channel.id, message.author.id)
+    stripped = content.strip()
+
+    # Đang có 1 yêu cầu gia hạn chờ xác nhận Y/N của đúng user này trong
+    # đúng kênh này -> ưu tiên xử lý xác nhận trước khi coi là lệnh "GH" mới.
+    pending = _pending_shop_extend.get(key)
+    if pending is not None:
+        if time.time() - pending["ts"] > _SHOP_EXTEND_CONFIRM_TTL_SEC:
+            _pending_shop_extend.pop(key, None)
+        elif stripped.lower() in ("y", "n"):
+            _pending_shop_extend.pop(key, None)
+            if stripped.lower() == "n":
+                await message.reply("Đã huỷ gia hạn.", mention_author=False)
+                return True
+            item_key = pending["item_key"]
+            item = features.SHOP_ITEMS[item_key]
+            result = await features.extend_shop_item(message.author.id, item_key)
+            if not result["ok"]:
+                if result["reason"] == "insufficient_funds":
+                    await message.reply(
+                        f"❌ Không đủ MICK để gia hạn! Cần **{result['need']}**, bạn có **{result['have']}**.",
+                        mention_author=False,
+                    )
+                elif result["reason"] == "not_owned":
+                    await message.reply(
+                        f"Bạn không còn sở hữu **{item['name']}** nữa (đã hết hạn) - mua lại qua `/mick-shop` nhé.",
+                        mention_author=False,
+                    )
+                else:
+                    await message.reply("❌ Có lỗi xảy ra, thử lại sau.", mention_author=False)
+                return True
+            expires_at = int(result["expires_at"])
+            await message.reply(
+                f"✅ Đã gia hạn **{item['emoji']} {item['name']}** thêm **{item['hours']}H** "
+                f"(hết hạn <t:{expires_at}:R>)!",
+                mention_author=False,
+            )
+            return True
+
+    if not stripped.upper().startswith("GH "):
+        return False
+
+    product_name = stripped[3:].strip()
+    item_key = features.resolve_shop_item_key(product_name)
+    if item_key is None:
+        await message.reply("Xin lỗi Bạn cần gì", mention_author=False)
+        return True
+
+    existing = await features.get_active_shop_effect(message.author.id, item_key)
+    item = features.SHOP_ITEMS[item_key]
+    if not existing:
+        await message.reply(
+            f"Bạn chưa sở hữu **{item['name']}** nên không gia hạn được - mua mới qua `/mick-shop` nhé.",
+            mention_author=False,
+        )
+        return True
+
+    _pending_shop_extend[key] = {"item_key": item_key, "ts": time.time()}
+    await message.reply(
+        f"Bạn muốn gia hạn **{item['emoji']} {item['name']}** thêm **{item['hours']}H** "
+        f"với giá **{item['price']} MICK**? Gõ **Y** để xác nhận hoặc **N** để huỷ.",
+        mention_author=False,
+    )
+    return True
+
+
 @client.event
 async def on_message(message: discord.Message):
     if message.author.bot or message.guild is None:
@@ -1012,6 +1144,12 @@ async def on_message(message: discord.Message):
 
     content = message.content.strip()
     lowered = content.lower()
+
+    # Gia hạn /mick-shop: "GH {tên}" hoặc "Y"/"N" xác nhận - xử lý sớm và
+    # dừng luôn nếu đã xử lý, tránh XP/quest/học từ chạy nhầm trên các tin
+    # nhắn ngắn kiểu "Y"/"N" vốn không mang nghĩa gì khác.
+    if await _handle_gh_command(message, content):
+        return
 
     # Quest: "i love @ai đó" - cần có mention thật trong tin nhắn
     if lowered.startswith("i love") and message.mentions:
@@ -1384,6 +1522,64 @@ async def level_cmd(interaction: discord.Interaction, thanh_vien: discord.Member
 # vì gõ vào kênh chat - tránh người khác lỡ gõ giùm/gõ nhầm, và nhiều ván có
 # thể chạy song song. Ván nào cũng tra lại được bằng lệnh /check-game.
 # ---------------------------------------------------------------------------
+
+
+class SimpleStringModal(discord.ui.Modal, title="Nhập đáp án"):
+    answer = discord.ui.TextInput(label="Đáp án", min_length=1, max_length=50)
+
+    def __init__(self, game_type: str, game_id: str, owner_id: int, placeholder: str = ""):
+        super().__init__()
+        self.game_type = game_type
+        self.game_id = game_id
+        self.owner_id = owner_id
+        if placeholder:
+            self.answer.placeholder = placeholder
+
+    async def on_submit(self, interaction: discord.Interaction):
+        guess = str(self.answer).strip()
+        if self.game_type == "emoji_riddle":
+            container = await process_emoji_riddle(self.game_id, guess)
+            if container is None:
+                await interaction.response.send_message("❌ Ván này đã kết thúc hoặc không tồn tại!", ephemeral=True)
+                return
+            game = _active_games.get(self.game_id)
+            if game and game["status"] != "playing":
+                layout = GameLayoutView(timeout=1)
+                await _append_ticket_footer(container, self.owner_id)
+                layout._set_container(container)
+                await interaction.response.edit_message(view=layout)
+                await _finish_minigame(interaction, self.owner_id)
+            else:
+                view = EmojiRiddleView(self.game_id, self.owner_id)
+                view._set_container(container)
+                await interaction.response.edit_message(view=view)
+
+
+class SimpleBetModal(discord.ui.Modal, title="Nhập số MICK cược"):
+    amount = discord.ui.TextInput(label="Số MICK", min_length=1, max_length=10, placeholder="vd: 100")
+
+    def __init__(self, game_type: str, game_id: str, owner_id: int, extra: str = ""):
+        super().__init__()
+        self.game_type = game_type
+        self.game_id = game_id
+        self.owner_id = owner_id
+        self.extra = extra
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            bet_amount = int(str(self.amount).strip())
+            if bet_amount <= 0:
+                raise ValueError
+        except ValueError:
+            await interaction.response.send_message("❌ Phải nhập số dương!", ephemeral=True)
+            return
+
+        if self.game_type == "horse_race":
+            msg, _ = await games_shop.process_horse_race_bet(self.game_id, self.extra, bet_amount)
+            if msg:
+                await interaction.response.send_message(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message("❌ Cược thất bại (không đủ MICK hoặc lỗi).", ephemeral=True)
 
 
 class WordleGuessModal(discord.ui.Modal, title="Đoán từ Wordle"):
@@ -1934,7 +2130,17 @@ class GameChooserView(GameLayoutView):
             ("Đoán Màu", "🎨", discord.ButtonStyle.primary, self._btn_doanmau),
             ("Vòng Quay May Mắn", "🎡", discord.ButtonStyle.success, self._btn_vongquay),
         )
-        for row_index, row_defs in enumerate((row0, row1, row2)):
+        row3 = (
+            ("Emoji Riddle", "🎨", discord.ButtonStyle.primary, self._btn_emoji_riddle),
+            ("Cờ Caro (PvP)", "🎮", discord.ButtonStyle.success, self._btn_tictactoe),
+            ("Đua Ngựa", "🏇", discord.ButtonStyle.warning, self._btn_horse_race),
+        )
+        row4 = (
+            ("Slot Machine", "🎰", discord.ButtonStyle.primary, self._btn_slot),
+            ("Cao/Thấp Bài Cào", "🃏", discord.ButtonStyle.danger, self._btn_high_low),
+            ("Dò Mìn", "💣", discord.ButtonStyle.secondary, self._btn_minesweeper),
+        )
+        for row_index, row_defs in enumerate((row0, row1, row2, row3, row4)):
             for label, emoji, style, handler in row_defs:
                 button = discord.ui.Button(label=label, emoji=emoji, style=style)
                 button.callback = handler
@@ -1956,7 +2162,7 @@ class GameChooserView(GameLayoutView):
             return
         if not await _require_ticket(interaction):
             return
-        gid, container = features.start_wordle(self.owner_id)
+        gid, container = await features.start_wordle(self.owner_id)
         await _append_ticket_footer(container, self.owner_id)
         view = WordleView(gid, self.owner_id)
         view._set_container(container)
@@ -2021,6 +2227,219 @@ class GameChooserView(GameLayoutView):
         view = VongQuayView(gid, self.owner_id)
         view._set_container(container)
         await interaction.response.edit_message(view=view)
+
+    async def _btn_emoji_riddle(self, interaction: discord.Interaction):
+        if not await _require_ticket(interaction):
+            return
+        gid, container = start_emoji_riddle(self.owner_id)
+        await _append_ticket_footer(container, self.owner_id)
+        view = EmojiRiddleView(gid, self.owner_id)
+        view._set_container(container)
+        await interaction.response.edit_message(view=view)
+
+    async def _btn_tictactoe(self, interaction: discord.Interaction):
+        if not await _require_ticket(interaction):
+            return
+        gid, container = start_tictactoe(self.owner_id)
+        await _append_ticket_footer(container, self.owner_id)
+        view = TicTacToeView(gid, self.owner_id)
+        view._set_container(container)
+        await interaction.response.edit_message(view=view)
+
+    async def _btn_horse_race(self, interaction: discord.Interaction):
+        if not await _require_ticket(interaction):
+            return
+        gid, container = start_horse_race(self.owner_id)
+        await _append_ticket_footer(container, self.owner_id)
+        view = HorseRaceView(gid, self.owner_id)
+        view._set_container(container)
+        await interaction.response.edit_message(view=view)
+
+    async def _btn_slot(self, interaction: discord.Interaction):
+        if not await _require_ticket(interaction):
+            return
+        gid, container = start_slot_machine(self.owner_id)
+        await _append_ticket_footer(container, self.owner_id)
+        self._disable_all_buttons()
+        self._set_container(container)
+        await interaction.response.edit_message(view=self)
+        await _finish_minigame(interaction, self.owner_id)
+
+    async def _btn_high_low(self, interaction: discord.Interaction):
+        if not await _require_ticket(interaction):
+            return
+        gid, container = start_high_low(self.owner_id)
+        await _append_ticket_footer(container, self.owner_id)
+        view = HighLowView(gid, self.owner_id)
+        view._set_container(container)
+        await interaction.response.edit_message(view=view)
+
+    async def _btn_minesweeper(self, interaction: discord.Interaction):
+        if not await _require_ticket(interaction):
+            return
+        gid, container = start_minesweeper(self.owner_id)
+        await _append_ticket_footer(container, self.owner_id)
+        view = MinesweeperView(gid, self.owner_id)
+        view._set_container(container)
+        await interaction.response.edit_message(view=view)
+
+
+# ---------------------------------------------------------------------------
+# Views cho 6 game mới
+# ---------------------------------------------------------------------------
+
+
+class EmojiRiddleView(GameLayoutView):
+    def __init__(self, game_id: str, owner_id: int):
+        super().__init__(timeout=120)
+        self.game_id = game_id
+        self.owner_id = owner_id
+        guess_btn = discord.ui.Button(label="Nhập từ", emoji="📝", style=discord.ButtonStyle.primary)
+        guess_btn.callback = self._btn_guess
+        self._add_button(guess_btn)
+        self._add_button(StopGameButton(game_id, owner_id))
+
+    async def _btn_guess(self, interaction: discord.Interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Không phải ván của bạn!", ephemeral=True)
+            return
+        await interaction.response.send_modal(SimpleStringModal("emoji_riddle", self.game_id, self.owner_id, placeholder="Nhập từ tiếng Anh (thường)"))
+
+
+class TicTacToeView(GameLayoutView):
+    def __init__(self, game_id: str, owner_id: int):
+        super().__init__(timeout=180)
+        self.game_id = game_id
+        self.owner_id = owner_id
+        for i in range(9):
+            btn = discord.ui.Button(label=str(i), style=discord.ButtonStyle.secondary)
+            btn.callback = self._make_move_callback(i)
+            self._add_button(btn, row=i // 3)
+        self._add_button(StopGameButton(game_id, owner_id), row=3)
+
+    def _make_move_callback(self, pos: int):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message("Không phải ván của bạn!", ephemeral=True)
+                return
+            container = await process_tictactoe(self.game_id, str(pos))
+            if container is None:
+                await interaction.response.send_message("Ô này đã có ký hiệu rồi!", ephemeral=True)
+                return
+            game = _active_games.get(self.game_id)
+            if game and game["status"] != "playing":
+                self._disable_all_buttons()
+                await _append_ticket_footer(container, self.owner_id)
+                self._set_container(container)
+                await interaction.response.edit_message(view=self)
+                await _finish_minigame(interaction, self.owner_id)
+            else:
+                self._set_container(container)
+                await interaction.response.edit_message(view=self)
+        return callback
+
+
+class HorseRaceView(GameLayoutView):
+    def __init__(self, game_id: str, owner_id: int):
+        super().__init__(timeout=60)
+        self.game_id = game_id
+        self.owner_id = owner_id
+        self._container.add_item(discord.ui.TextDisplay("Chọn ngựa (1-5) và cược MICK:"))
+        for i in range(1, 6):
+            btn = discord.ui.Button(label=f"Ngựa {i}", style=discord.ButtonStyle.primary)
+            btn.callback = self._make_bet_callback(i)
+            self._add_button(btn, row=0 + i // 3)
+        finish_btn = discord.ui.Button(label="Quay kết quả", emoji="🏁", style=discord.ButtonStyle.success)
+        finish_btn.callback = self._btn_finish
+        self._add_button(finish_btn, row=2)
+
+    def _make_bet_callback(self, horse: int):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message("Không phải ván của bạn!", ephemeral=True)
+                return
+            await interaction.response.send_modal(SimpleBetModal("horse_race", self.game_id, self.owner_id, str(horse)))
+        return callback
+
+    async def _btn_finish(self, interaction: discord.Interaction):
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Không phải ván của bạn!", ephemeral=True)
+            return
+        container = games_shop.finish_horse_race(self.game_id)
+        if container:
+            self._disable_all_buttons()
+            await _append_ticket_footer(container, self.owner_id)
+            self._set_container(container)
+            await interaction.response.edit_message(view=self)
+            await _finish_minigame(interaction, self.owner_id)
+
+
+class HighLowView(GameLayoutView):
+    def __init__(self, game_id: str, owner_id: int):
+        super().__init__(timeout=120)
+        self.game_id = game_id
+        self.owner_id = owner_id
+        high_btn = discord.ui.Button(label="▲ Cao hơn", style=discord.ButtonStyle.primary)
+        high_btn.callback = self._make_guess_callback("cao")
+        low_btn = discord.ui.Button(label="▼ Thấp hơn", style=discord.ButtonStyle.secondary)
+        low_btn.callback = self._make_guess_callback("thấp")
+        self._add_button(high_btn, row=0)
+        self._add_button(low_btn, row=0)
+        self._add_button(StopGameButton(game_id, owner_id), row=1)
+
+    def _make_guess_callback(self, guess: str):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message("Không phải ván của bạn!", ephemeral=True)
+                return
+            container = await process_high_low_guess(self.game_id, guess)
+            if container is None:
+                await interaction.response.send_message("Ván không tồn tại!", ephemeral=True)
+                return
+            game = _active_games.get(self.game_id)
+            if game and game["status"] != "playing":
+                self._disable_all_buttons()
+                await _append_ticket_footer(container, self.owner_id)
+                self._set_container(container)
+                await interaction.response.edit_message(view=self)
+                await _finish_minigame(interaction, self.owner_id)
+            else:
+                self._set_container(container)
+                await interaction.response.edit_message(view=self)
+        return callback
+
+
+class MinesweeperView(GameLayoutView):
+    def __init__(self, game_id: str, owner_id: int):
+        super().__init__(timeout=180)
+        self.game_id = game_id
+        self.owner_id = owner_id
+        for i in range(25):
+            btn = discord.ui.Button(label=str(i), style=discord.ButtonStyle.secondary, emoji="❓")
+            btn.callback = self._make_click_callback(i)
+            self._add_button(btn, row=i // 5)
+        self._add_button(StopGameButton(game_id, owner_id), row=5)
+
+    def _make_click_callback(self, pos: int):
+        async def callback(interaction: discord.Interaction):
+            if interaction.user.id != self.owner_id:
+                await interaction.response.send_message("Không phải ván của bạn!", ephemeral=True)
+                return
+            container = await process_minesweeper(self.game_id, str(pos))
+            if container is None:
+                await interaction.response.send_message("Ô này đã mở rồi!", ephemeral=True)
+                return
+            game = _active_games.get(self.game_id)
+            if game and game["status"] != "playing":
+                self._disable_all_buttons()
+                await _append_ticket_footer(container, self.owner_id)
+                self._set_container(container)
+                await interaction.response.edit_message(view=self)
+                await _finish_minigame(interaction, self.owner_id)
+            else:
+                self._set_container(container)
+                await interaction.response.edit_message(view=self)
+        return callback
 
 
 @tree.command(
@@ -2169,6 +2588,12 @@ async def leaderboard_cmd(interaction: discord.Interaction, loai: discord.app_co
     sort_key = loai.value if loai else "level"
 
     users = await db.get_all_users()
+    # Owner có MICK/Level "vô hạn" (chỉ là số hiển thị ảo, không phải số
+    # thật trong DB) nên KHÔNG được tham gia bảng xếp hạng - nếu để lẫn vào,
+    # số mick thật (nhỏ) trong DB làm owner rơi sai vị trí, còn số hiển thị
+    # ảo (9999999999) lại không khớp với vị trí sort thật => bảng xếp hạng
+    # trông sai/lệch. Lọc bỏ owner khỏi danh sách trước khi sort.
+    users = [u for u in users if not economy.is_owner(int(u[0]))]
     if sort_key == "level":
         users.sort(key=lambda u: (u[1].get("level", 0), u[1].get("xp", 0)), reverse=True)
     else:
@@ -2725,7 +3150,78 @@ async def confession_cmd(interaction: discord.Interaction):
 
 
 # ---------------------------------------------------------------------------
-# Slash command: Help - liệt kê toàn bộ lệnh theo nhóm, bấm nút để xem chi tiết
+# Slash command: /mick-shop - mua item bằng MICK (Admin Trial, Ronaldo
+# Pasta, La Peace, DeltaX). Gia hạn qua tin nhắn thường "GH {tên}" xem
+# on_message ở trên.
+# ---------------------------------------------------------------------------
+
+
+class MickShopView(discord.ui.LayoutView):
+    def __init__(self, owner_id: int, container: discord.ui.Container):
+        super().__init__(timeout=120)
+        self.owner_id = owner_id
+        self._container = container
+        self.add_item(self._container)
+
+        row = discord.ui.ActionRow()
+        self.add_item(row)
+        for key, item in features.SHOP_ITEMS.items():
+            button = discord.ui.Button(label=item["name"], emoji=item["emoji"], style=discord.ButtonStyle.primary)
+            button.callback = self._make_buy_callback(key)
+            row.add_item(button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Dùng `/mick-shop` để mua đồ cho riêng bạn!", ephemeral=True)
+            return False
+        return True
+
+    def _make_buy_callback(self, item_key: str):
+        async def callback(interaction: discord.Interaction):
+            item = features.SHOP_ITEMS[item_key]
+            result = await features.buy_shop_item(self.owner_id, item_key)
+            if not result["ok"]:
+                if result["reason"] == "already_owned":
+                    remaining = int(result["expires_at"] - time.time())
+                    h, m = remaining // 3600, (remaining % 3600) // 60
+                    await interaction.response.send_message(
+                        f"Bạn đang sở hữu **{item['name']}** rồi (còn **{h}H{m}p**)! "
+                        f"Gõ `GH {item['name']}` trong chat để gia hạn nhé.",
+                        ephemeral=True,
+                    )
+                elif result["reason"] == "insufficient_funds":
+                    await interaction.response.send_message(
+                        f"❌ Không đủ MICK! Cần **{result['need']}**, bạn có **{result['have']}**.",
+                        ephemeral=True,
+                    )
+                else:
+                    await interaction.response.send_message("❌ Có lỗi xảy ra, thử lại sau.", ephemeral=True)
+                return
+
+            await features.apply_shop_purchase_effects(interaction.guild, self.owner_id, item_key)
+            owned = await features.get_user_shop_status(self.owner_id)
+            new_container = features.build_shop_container(owned)
+            self._container.clear_items()
+            for c in new_container.children:
+                self._container.add_item(c)
+            await interaction.response.edit_message(view=self)
+            await interaction.followup.send(
+                f"✅ Đã mua **{item['emoji']} {item['name']}** với giá **{item['price']} MICK**!",
+                ephemeral=True,
+            )
+        return callback
+
+
+@tree.command(name="mick-shop", description="Mua item bằng MICK: Admin Trial, Ronaldo Pasta, La Peace, DeltaX")
+async def mick_shop_cmd(interaction: discord.Interaction):
+    owned = await features.get_user_shop_status(interaction.user.id)
+    container = features.build_shop_container(owned)
+    view = MickShopView(interaction.user.id, container)
+    await interaction.response.send_message(view=view)
+
+
+# ---------------------------------------------------------------------------
+# Slash commands: Help - liệt kê toàn bộ lệnh theo nhóm, bấm nút để xem chi tiết
 # ---------------------------------------------------------------------------
 
 _HELP_CATEGORIES = [
@@ -2778,6 +3274,15 @@ _HELP_CATEGORIES = [
             ("/confession", "Gửi 1 lời thú tội ẩn danh 100% vào kênh thú tội — nhập qua form"),
         ],
     },
+    {
+        "key": "shop",
+        "label": "Mick Shop",
+        "emoji": "🛒",
+        "commands": [
+            ("/mick-shop", "Mua item bằng MICK: Admin Trial, Ronaldo Pasta, La Peace, DeltaX"),
+            ("GH {tên sản phẩm}", "Gia hạn item đang sở hữu (gõ trong chat, bot sẽ hỏi xác nhận Y/N)"),
+        ],
+    },
 ]
 
 
@@ -2797,23 +3302,32 @@ def _fill_help_container(container: discord.ui.Container, cat: dict | None) -> N
 
 
 class HelpLayoutView(discord.ui.LayoutView):
-    """Components V2 - có Separator thật, thay cho HelpView (embed) cũ."""
+    """Components V2 - có Separator thật, thay cho HelpView (embed) cũ.
+    Toàn bộ nút chuyển nhóm được gộp NẰM TRONG cùng 1 Container với nội
+    dung (Discord Components V2 hỗ trợ lồng ActionRow bên trong Container),
+    thay vì để rời 1 ActionRow riêng bên ngoài/dưới Container như trước -
+    nhìn liền thành 1 khung duy nhất, gọn hơn."""
 
     def __init__(self):
         super().__init__(timeout=180)
         self._container = discord.ui.Container()
-        _fill_help_container(self._container, None)
         self.add_item(self._container)
-        row = discord.ui.ActionRow()
+        self._button_row = discord.ui.ActionRow()
         for cat in _HELP_CATEGORIES:
-            row.add_item(self._make_button(cat))
-        self.add_item(row)
+            self._button_row.add_item(self._make_button(cat))
+        self._render(None)
+
+    def _render(self, cat: dict | None) -> None:
+        self._container.clear_items()
+        _fill_help_container(self._container, cat)
+        self._container.add_item(discord.ui.Separator(visible=True))
+        self._container.add_item(self._button_row)
 
     def _make_button(self, cat: dict) -> discord.ui.Button:
         button = discord.ui.Button(label=cat["label"], emoji=cat["emoji"], style=discord.ButtonStyle.secondary)
 
         async def callback(interaction: discord.Interaction):
-            _fill_help_container(self._container, cat)
+            self._render(cat)
             await interaction.response.edit_message(view=self)
 
         button.callback = callback

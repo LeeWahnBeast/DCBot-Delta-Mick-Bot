@@ -47,6 +47,18 @@ from config import (
     DAILY_STREAK_HISTORY_LEN,
     WORDLE_WIN_REWARD,
     WORDLE_MAX_GUESSES,
+    ADMIN_TRIAL_ROLE_ID,
+    ADMIN_TRIAL_PRICE,
+    ADMIN_TRIAL_HOURS,
+    RONALDO_PASTA_PRICE,
+    RONALDO_PASTA_HOURS,
+    RONALDO_PASTA_EXTRA_GUESSES,
+    LA_PEACE_PRICE,
+    LA_PEACE_HOURS,
+    DELTAX_PRICE,
+    DELTAX_HOURS,
+    DELTAX_MULT_MIN,
+    DELTAX_MULT_MAX,
     GUESS_NUMBER_REWARD,
     GUESS_NUMBER_MAX,
     GUESS_NUMBER_MAX_TRIES,
@@ -1017,14 +1029,21 @@ def _render_board(game: dict) -> str:
     lines = []
     for guess, fb in zip(game["guesses"], game["feedback"]):
         lines.append(f"{fb}   `{guess.upper()}`")
-    remaining = WORDLE_MAX_GUESSES - len(game["guesses"])
+    max_guesses = game.get("max_guesses", WORDLE_MAX_GUESSES)
+    remaining = max_guesses - len(game["guesses"])
     lines.append(f"\nCòn **{remaining}** lượt đoán. Bấm nút \"Nhập từ\" bên dưới để đoán.")
     return "\n".join(lines) if game["guesses"] else "Bấm nút \"Nhập từ\" bên dưới để bắt đầu đoán 1 từ tiếng Anh 5 chữ!"
 
 
-def start_wordle(user_id: int) -> tuple[str, discord.ui.Container]:
+async def start_wordle(user_id: int) -> tuple[str, discord.ui.Container]:
     gid = _new_game_id()
     answer = random.choice(_WORDLE_WORDS)
+    # Ronaldo Pasta (/mick-shop): +RONALDO_PASTA_EXTRA_GUESSES lượt đoán nếu
+    # user đang sở hữu item còn hạn (xem get_active_shop_effect).
+    max_guesses = WORDLE_MAX_GUESSES
+    pasta = await get_active_shop_effect(user_id, "ronaldo_pasta")
+    if pasta:
+        max_guesses += RONALDO_PASTA_EXTRA_GUESSES
     _active_games[gid] = {
         "type": "wordle",
         "owner_id": user_id,
@@ -1033,12 +1052,13 @@ def start_wordle(user_id: int) -> tuple[str, discord.ui.Container]:
         "answer": answer,
         "guesses": [],
         "feedback": [],
+        "max_guesses": max_guesses,
     }
     container = build_container(
         title=f"🟩 Wordle · #{gid}",
         description=_render_board(_active_games[gid]),
         color=discord.Color.blurple(),
-        footer=f"Đoán đúng nhận {WORDLE_WIN_REWARD} MICK · Tối đa {WORDLE_MAX_GUESSES} lượt",
+        footer=f"Đoán đúng nhận {WORDLE_WIN_REWARD} MICK · Tối đa {max_guesses} lượt",
     )
     return gid, container
 
@@ -1063,7 +1083,8 @@ async def process_wordle_guess(game_id: str, guess: str) -> tuple[discord.ui.Con
     game["feedback"].append(fb)
 
     won = guess == answer
-    out_of_tries = len(game["guesses"]) >= WORDLE_MAX_GUESSES
+    max_guesses = game.get("max_guesses", WORDLE_MAX_GUESSES)
+    out_of_tries = len(game["guesses"]) >= max_guesses
 
     if won:
         new_balance = await economy.add_mick(user_id, WORDLE_WIN_REWARD)
@@ -1099,7 +1120,7 @@ async def process_wordle_guess(game_id: str, guess: str) -> tuple[discord.ui.Con
         title=f"🟩 Wordle · #{game_id}",
         description=_render_board(game),
         color=discord.Color.blurple(),
-        footer=f"Đoán đúng nhận {WORDLE_WIN_REWARD} MICK · Tối đa {WORDLE_MAX_GUESSES} lượt",
+        footer=f"Đoán đúng nhận {WORDLE_WIN_REWARD} MICK · Tối đa {max_guesses} lượt",
     )
     return container, False
 
@@ -2031,3 +2052,238 @@ async def run_income_tick() -> int:
     if paid:
         log.info("Business tick: đã trả thu nhập cho %s cơ sở.", paid)
     return paid
+
+
+# ===========================================================================
+# /mick-shop: 4 item mua bằng MICK, mỗi item có hạn dùng riêng
+#
+#   1. Admin Trial (ADMIN_TRIAL_ROLE_ID, 1h) - gán role admin tạm thời.
+#   2. Ronaldo Pasta (50h) - +RONALDO_PASTA_EXTRA_GUESSES lượt đoán Wordle
+#      (xem start_wordle/process_wordle_guess ở trên).
+#   3. La Peace (24h) - troll thuần, không ảnh hưởng gameplay thật, chỉ hiện
+#      trong /mick-shop của user.
+#   4. DeltaX (5h) - nhân MICK kiếm được x{random 1.1-2.0}, hệ số chốt 1 lần
+#      lúc mua/gia hạn (xem economy._apply_deltax_multiplier).
+#
+# Gia hạn qua tin nhắn thường "GH {tên sản phẩm}" (xem on_message trong
+# discord_bot.py) - bot hỏi lại Y/N trước khi trừ tiền, giá gia hạn = giá
+# mua mới. Hết hạn tự dọn (gỡ role nếu có) qua shop_expiry_loop.
+# ===========================================================================
+
+SHOP_ITEMS: dict[str, dict] = {
+    "admin_trial": {
+        "name": "Admin Trial",
+        "emoji": "🛡️",
+        "price": ADMIN_TRIAL_PRICE,
+        "hours": ADMIN_TRIAL_HOURS,
+        "desc": f"Cấp role <@&{ADMIN_TRIAL_ROLE_ID}> tạm thời trong {ADMIN_TRIAL_HOURS}H.",
+    },
+    "ronaldo_pasta": {
+        "name": "Ronaldo Pasta",
+        "emoji": "🍝",
+        "price": RONALDO_PASTA_PRICE,
+        "hours": RONALDO_PASTA_HOURS,
+        "desc": f"Mì ống Ronaldo giúp bạn khó thua ở Wordle hơn (+{RONALDO_PASTA_EXTRA_GUESSES} lượt đoán) trong {RONALDO_PASTA_HOURS}H.",
+    },
+    "la_peace": {
+        "name": "La Peace",
+        "emoji": "☮️",
+        "price": LA_PEACE_PRICE,
+        "hours": LA_PEACE_HOURS,
+        "desc": "???",
+    },
+    "deltax": {
+        "name": "DeltaX",
+        "emoji": "✖️",
+        "price": DELTAX_PRICE,
+        "hours": DELTAX_HOURS,
+        "desc": f"Tăng MICK kiếm được x(random {DELTAX_MULT_MIN}-{DELTAX_MULT_MAX}) trong {DELTAX_HOURS}H.",
+    },
+}
+
+# Alias để nhận diện tên sản phẩm gõ tay trong "GH {tên}" - không phân biệt
+# hoa/thường, chấp nhận cả tên tiếng Việt lẫn key nội bộ.
+_SHOP_NAME_ALIASES: dict[str, str] = {}
+for _key, _item in SHOP_ITEMS.items():
+    _SHOP_NAME_ALIASES[_item["name"].lower()] = _key
+    _SHOP_NAME_ALIASES[_key.lower()] = _key
+_SHOP_NAME_ALIASES["admin trial"] = "admin_trial"
+_SHOP_NAME_ALIASES["ronaldo pasta"] = "ronaldo_pasta"
+_SHOP_NAME_ALIASES["mì ronaldo"] = "ronaldo_pasta"
+_SHOP_NAME_ALIASES["la peace"] = "la_peace"
+del _key, _item
+
+
+def resolve_shop_item_key(text: str) -> str | None:
+    return _SHOP_NAME_ALIASES.get(text.strip().lower())
+
+
+async def get_active_shop_effect(user_id: int, item_key: str) -> dict | None:
+    """Trả về data purchase nếu user đang sở hữu item còn hạn, None nếu
+    không có/đã hết hạn (không tự xoá ở đây - shop_expiry_loop lo việc đó,
+    hàm này chỉ ĐỌC để các chỗ khác - Wordle, DeltaX... - biết mà áp dụng)."""
+    purchase = await db.get_shop_purchase(user_id, item_key)
+    if not purchase or purchase.get("expires_at", 0) <= time.time():
+        return None
+    return purchase
+
+
+async def get_user_shop_status(user_id: int) -> list[dict]:
+    """Trả về danh sách item user ĐANG sở hữu (còn hạn), kèm remaining_sec -
+    dùng để hiện trong /mick-shop."""
+    out = []
+    now = time.time()
+    for key, item in SHOP_ITEMS.items():
+        purchase = await db.get_shop_purchase(user_id, key)
+        if purchase and purchase.get("expires_at", 0) > now:
+            out.append({
+                "key": key,
+                **item,
+                "remaining_sec": int(purchase["expires_at"] - now),
+            })
+    return out
+
+
+async def buy_shop_item(user_id: int, item_key: str) -> dict:
+    """Mua 1 item mới (chỉ khi CHƯA sở hữu - dùng gia hạn qua "GH {tên}" nếu
+    đã có). Trả {ok, reason} hoặc {ok: True, item, expires_at}."""
+    item = SHOP_ITEMS.get(item_key)
+    if not item:
+        return {"ok": False, "reason": "not_found"}
+
+    existing = await get_active_shop_effect(user_id, item_key)
+    if existing:
+        return {"ok": False, "reason": "already_owned", "expires_at": existing["expires_at"]}
+
+    return await _do_purchase(user_id, item_key, item)
+
+
+async def _do_purchase(user_id: int, item_key: str, item: dict) -> dict:
+    async with economy.user_lock(user_id):
+        user = await db.get_user(user_id)
+        current = user.get("mick", 0)
+        if not economy.is_owner(user_id) and current < item["price"]:
+            return {"ok": False, "reason": "insufficient_funds", "have": current, "need": item["price"]}
+        if not economy.is_owner(user_id):
+            new_balance = current - item["price"]
+            await db.save_user(user_id, {"mick": new_balance})
+
+    now = time.time()
+    expires_at = now + item["hours"] * 3600
+    data = {
+        "user_id": user_id,
+        "item_key": item_key,
+        "expires_at": expires_at,
+        "created_at": now,
+    }
+    if item_key == "deltax":
+        data["multiplier"] = round(random.uniform(DELTAX_MULT_MIN, DELTAX_MULT_MAX), 2)
+    await db.save_shop_purchase(user_id, item_key, data)
+    return {"ok": True, "item": item, "expires_at": expires_at, "data": data}
+
+
+async def extend_shop_item(user_id: int, item_key: str) -> dict:
+    """Gia hạn 1 item ĐANG sở hữu (còn hạn) - cộng thêm item['hours'] giờ
+    vào expires_at hiện tại (không reset về mốc mới, để không mất thời gian
+    còn lại), giá = giá mua mới. Trả {ok, reason} hoặc {ok: True, expires_at}."""
+    item = SHOP_ITEMS.get(item_key)
+    if not item:
+        return {"ok": False, "reason": "not_found"}
+
+    existing = await get_active_shop_effect(user_id, item_key)
+    if not existing:
+        return {"ok": False, "reason": "not_owned"}
+
+    async with economy.user_lock(user_id):
+        user = await db.get_user(user_id)
+        current = user.get("mick", 0)
+        if not economy.is_owner(user_id) and current < item["price"]:
+            return {"ok": False, "reason": "insufficient_funds", "have": current, "need": item["price"]}
+        if not economy.is_owner(user_id):
+            new_balance = current - item["price"]
+            await db.save_user(user_id, {"mick": new_balance})
+
+    new_expires_at = existing["expires_at"] + item["hours"] * 3600
+    update = {"expires_at": new_expires_at}
+    if item_key == "deltax":
+        # Gia hạn DeltaX chốt lại hệ số mới luôn (không giữ hệ số cũ), cùng
+        # tinh thần "mua lại 1 lượt mới" như các item khác.
+        update["multiplier"] = round(random.uniform(DELTAX_MULT_MIN, DELTAX_MULT_MAX), 2)
+    await db.save_shop_purchase(user_id, item_key, {**existing, **update})
+    return {"ok": True, "expires_at": new_expires_at}
+
+
+def build_shop_container(owned: list[dict]) -> discord.ui.Container:
+    lines = []
+    for key, item in SHOP_ITEMS.items():
+        lines.append(f"{item['emoji']} **{item['name']}** — {item['price']} MICK ({item['hours']}H)\n{item['desc']}")
+    body = "\n\n".join(lines)
+
+    owned_text = "Bạn chưa sở hữu item nào."
+    if owned:
+        owned_lines = []
+        for o in owned:
+            h = o["remaining_sec"] // 3600
+            m = (o["remaining_sec"] % 3600) // 60
+            owned_lines.append(f"{o['emoji']} **{o['name']}** — còn **{h}H{m}p**")
+        owned_text = "\n".join(owned_lines)
+
+    return build_container(
+        title="🛒 Mick Shop",
+        description=f"{body}\n\n### 📦 Đang sở hữu\n{owned_text}",
+        color=discord.Color.gold(),
+        footer="Mua bằng nút bên dưới · Gia hạn bằng tin nhắn \"GH {tên sản phẩm}\"",
+    )
+
+
+async def apply_shop_purchase_effects(guild: "discord.Guild | None", user_id: int, item_key: str) -> None:
+    """Xử lý side-effect NGAY LÚC MUA (hiện chỉ có admin_trial cần gán role
+    ngay - các item khác chỉ cần lưu DB, hiệu ứng đọc lại lúc dùng)."""
+    if item_key != "admin_trial" or guild is None:
+        return
+    member = guild.get_member(user_id)
+    if member is None:
+        return
+    role = guild.get_role(ADMIN_TRIAL_ROLE_ID)
+    if role is None:
+        log.warning("apply_shop_purchase_effects: không tìm thấy role %s trong guild", ADMIN_TRIAL_ROLE_ID)
+        return
+    try:
+        await member.add_roles(role, reason="Mua Admin Trial qua /mick-shop")
+    except Exception as e:
+        log.warning("Gán role Admin Trial lỗi cho %s: %s", user_id, e)
+
+
+async def run_shop_expiry_tick(client: "discord.Client") -> int:
+    """Duyệt toàn bộ shop_purchases, xoá + xử lý dọn dẹp (gỡ role) cho item
+    đã hết hạn - gọi định kỳ từ shop_expiry_loop (discord_bot.py). Trả về
+    số item vừa hết hạn được xử lý."""
+    now = time.time()
+    expired_count = 0
+    for doc_id, data in await db.get_all_shop_purchases():
+        expires_at = data.get("expires_at", 0)
+        if expires_at > now:
+            continue
+        try:
+            user_id_str, item_key = doc_id.rsplit("_", 1)
+            user_id = int(user_id_str)
+        except Exception:
+            continue
+
+        if item_key == "admin_trial":
+            for guild in client.guilds:
+                member = guild.get_member(user_id)
+                if member is None:
+                    continue
+                role = guild.get_role(ADMIN_TRIAL_ROLE_ID)
+                if role is None or role not in member.roles:
+                    continue
+                try:
+                    await member.remove_roles(role, reason="Admin Trial hết hạn (/mick-shop)")
+                except Exception as e:
+                    log.warning("Gỡ role Admin Trial lỗi cho %s: %s", user_id, e)
+
+        await db.delete_shop_purchase(user_id, item_key)
+        expired_count += 1
+
+    return expired_count

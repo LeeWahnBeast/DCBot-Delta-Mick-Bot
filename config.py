@@ -161,6 +161,23 @@ MEMBER_MILESTONE_CODE_MAX_USES = int(os.environ.get("MEMBER_MILESTONE_CODE_MAX_U
 MEMBER_MILESTONE_CODE_TTL_SEC = int(os.environ.get("MEMBER_MILESTONE_CODE_TTL_SEC", str(10 * 3600)))
 MEMBER_MILESTONE_CODE_REWARD_MICK = int(os.environ.get("MEMBER_MILESTONE_CODE_REWARD_MICK", "50"))
 
+# --- /mick-shop: 4 item mua bằng MICK, mỗi item có hạn dùng riêng, hết hạn
+# tự dọn (xem shop_expiry_loop trong discord_bot.py). Gia hạn qua tin nhắn
+# thường "GH {tên sản phẩm}" (xem on_message), giá gia hạn = giá mua mới. ---
+ADMIN_TRIAL_ROLE_ID = int(os.environ.get("ADMIN_TRIAL_ROLE_ID", "0") or 0) or 1537212897904558200
+ADMIN_TRIAL_PRICE = int(os.environ.get("ADMIN_TRIAL_PRICE", "9500"))
+ADMIN_TRIAL_HOURS = int(os.environ.get("ADMIN_TRIAL_HOURS", "1"))
+RONALDO_PASTA_PRICE = int(os.environ.get("RONALDO_PASTA_PRICE", "9500"))
+RONALDO_PASTA_HOURS = int(os.environ.get("RONALDO_PASTA_HOURS", "50"))
+RONALDO_PASTA_EXTRA_GUESSES = int(os.environ.get("RONALDO_PASTA_EXTRA_GUESSES", "2"))  # 6 -> 8 lượt
+LA_PEACE_PRICE = int(os.environ.get("LA_PEACE_PRICE", "9500"))
+LA_PEACE_HOURS = int(os.environ.get("LA_PEACE_HOURS", "24"))
+DELTAX_PRICE = int(os.environ.get("DELTAX_PRICE", "9500"))
+DELTAX_HOURS = int(os.environ.get("DELTAX_HOURS", "5"))
+DELTAX_MULT_MIN = float(os.environ.get("DELTAX_MULT_MIN", "1.1"))
+DELTAX_MULT_MAX = float(os.environ.get("DELTAX_MULT_MAX", "2.0"))
+SHOP_EXPIRY_CHECK_SEC = int(os.environ.get("SHOP_EXPIRY_CHECK_SEC", "60"))
+
 # --- Chuyển MICK (transfer): tiền càng cao, thời gian xử lý càng lâu ---
 TRANSFER_SECONDS_PER_MICK = float(os.environ.get("TRANSFER_SECONDS_PER_MICK", "0.05"))  # 0.05s/1 MICK
 TRANSFER_MIN_SECONDS = float(os.environ.get("TRANSFER_MIN_SECONDS", "2"))

@@ -375,6 +375,70 @@ async def save_milestone_code(code: str, data: dict) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# milestone_reached: mốc member cao nhất ĐÃ từng tạo code cho mỗi guild -
+# chống tạo code trùng khi member_count dao động qua lại quanh 1 mốc (vd
+# server đạt 200 -> có người rời xuống 199 -> có người join lại lên 200,
+# thì KHÔNG tạo code lần 2 vì mốc 200 đã ghi nhận là "đã xử lý" rồi). Field:
+# highest (int mốc cao nhất đã tạo code).
+# ---------------------------------------------------------------------------
+
+
+async def get_milestone_reached(guild_id: int) -> int:
+    data = await _get_doc("milestone_reached", str(guild_id))
+    try:
+        return int(data.get("highest", 0)) if data else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+async def save_milestone_reached(guild_id: int, highest: int) -> bool:
+    return await _set_doc("milestone_reached", str(guild_id), {"highest": highest}, merge=False)
+
+
+# ---------------------------------------------------------------------------
+# shop_purchases: item đang sở hữu của mỗi user từ /mick-shop (admin trial,
+# Ronaldo Pasta, La Peace, DeltaX...) - key doc là f"{user_id}:{item_key}".
+# Field: user_id, item_key, expires_at (epoch giây), multiplier (chỉ DeltaX
+# dùng, None với item khác), extra (dict tuỳ item, vd role_id đã gán để gỡ
+# đúng lúc hết hạn).
+# ---------------------------------------------------------------------------
+
+
+def _shop_doc_id(user_id: int, item_key: str) -> str:
+    return f"{user_id}_{item_key}"
+
+
+async def get_shop_purchase(user_id: int, item_key: str) -> dict | None:
+    data = await _get_doc("shop_purchases", _shop_doc_id(user_id, item_key))
+    return data or None
+
+
+async def save_shop_purchase(user_id: int, item_key: str, data: dict) -> bool:
+    return await _set_doc("shop_purchases", _shop_doc_id(user_id, item_key), data, merge=False)
+
+
+async def delete_shop_purchase(user_id: int, item_key: str) -> bool:
+    return await _delete_doc("shop_purchases", _shop_doc_id(user_id, item_key))
+
+
+async def get_all_shop_purchases() -> list[tuple[str, dict]]:
+    """Trả về [(doc_id, data), ...] toàn bộ item đang active - dùng cho vòng
+    lặp nền kiểm tra hết hạn (xem shop_expiry_loop trong discord_bot.py)."""
+    if _use_memory_fallback:
+        out = []
+        for key, val in _memory_store.items():
+            if key.startswith("shop_purchases/"):
+                out.append((key.split("/", 1)[1], dict(val)))
+        return out
+    try:
+        data, ok = await _rtdb_request("GET", "shop_purchases")
+        return list((data or {}).items()) if ok else []
+    except Exception as e:
+        _warn_throttled("đọc toàn bộ shop_purchases", str(e))
+        return []
+
+
+# ---------------------------------------------------------------------------
 # users: MICK, XP, level, Daily
 # ---------------------------------------------------------------------------
 
