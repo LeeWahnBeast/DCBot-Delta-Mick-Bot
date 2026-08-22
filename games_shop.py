@@ -132,18 +132,17 @@ def _render_tictactoe(game_id: str) -> discord.ui.Container:
     game = _active_games.get(game_id)
     if not game:
         return features.build_container(description="Ván không tồn tại.")
-    board = game["board"]
-    grid_text = "\n".join([
-        " ".join(board[i*3:(i+1)*3])
-        for i in range(3)
-    ])
     title = "❌ Luợt của bạn (X)" if game["turn"] == "X" else "⭕ Bot đang suy nghĩ (O)..."
     return features.build_container(
         title="🎮 Cờ Caro (Tic-Tac-Toe)",
-        description=f"{grid_text}\n\nNhập toạ độ (0-8) để đi nước.",
+        description=f"{_tictactoe_board_text(game['board'])}\n\nNhập toạ độ (0-8) để đi nước.",
         color=discord.Color.blurple(),
         footer=title,
     )
+
+
+def _tictactoe_board_text(board: list) -> str:
+    return "\n".join(" ".join(board[i*3:(i+1)*3]) for i in range(3))
 
 
 async def process_tictactoe(game_id: str, move: str) -> discord.ui.Container | None:
@@ -158,52 +157,41 @@ async def process_tictactoe(game_id: str, move: str) -> discord.ui.Container | N
     except (ValueError, IndexError):
         return None
 
-    game["board"][pos] = _TICTACTOE_X
-    if _check_tictactoe_win(game["board"], _TICTACTOE_X):
-        game["status"] = "won"
-        game["finished_at"] = time.time()
-        container = features.build_container(
-            title="🎉 Bạn thắng!",
-            description="".join([" ".join(game["board"][i*3:(i+1)*3]) + "\n" for i in range(3)]) + "\n💰 Bạn nhận **30 MICK**.",
-            color=discord.Color.green(),
-        )
-        await economy.add_mick(game["owner_id"], 30)
-        return container
+    board = game["board"]
+    board[pos] = _TICTACTOE_X
+    result = _tictactoe_outcome(game, board, _TICTACTOE_X)
+    if result:
+        return result
 
-    if all(x != _TICTACTOE_EMPTY for x in game["board"]):
-        game["status"] = "draw"
-        game["finished_at"] = time.time()
-        container = features.build_container(
-            title="🤝 Hòa!",
-            description="".join([" ".join(game["board"][i*3:(i+1)*3]) + "\n" for i in range(3)]),
-            color=discord.Color.yellow(),
-        )
-        return container
-
-    bot_move = _find_tictactoe_move(game["board"])
-    game["board"][bot_move] = _TICTACTOE_O
-    if _check_tictactoe_win(game["board"], _TICTACTOE_O):
-        game["status"] = "lost"
-        game["finished_at"] = time.time()
-        container = features.build_container(
-            title="💀 Bot thắng!",
-            description="".join([" ".join(game["board"][i*3:(i+1)*3]) + "\n" for i in range(3)]),
-            color=discord.Color.red(),
-        )
-        return container
-
-    if all(x != _TICTACTOE_EMPTY for x in game["board"]):
-        game["status"] = "draw"
-        game["finished_at"] = time.time()
-        container = features.build_container(
-            title="🤝 Hòa!",
-            description="".join([" ".join(game["board"][i*3:(i+1)*3]) + "\n" for i in range(3)]),
-            color=discord.Color.yellow(),
-        )
-        return container
+    bot_move = _find_tictactoe_move(board)
+    board[bot_move] = _TICTACTOE_O
+    result = _tictactoe_outcome(game, board, _TICTACTOE_O)
+    if result:
+        return result
 
     game["turn"] = "X"
     return _render_tictactoe(game_id)
+
+
+def _tictactoe_outcome(game: dict, board: list, just_played: str) -> discord.ui.Container | None:
+    """Nếu vừa có người thắng hoặc bàn đã đầy (hòa), đóng ván + trả kết quả.
+    Trả None nếu ván vẫn tiếp tục (chưa ai thắng, còn ô trống)."""
+    if _check_tictactoe_win(board, just_played):
+        game["status"] = "won" if just_played == _TICTACTOE_X else "lost"
+        game["finished_at"] = time.time()
+        if just_played == _TICTACTOE_X:
+            asyncio.create_task(economy.add_mick(game["owner_id"], 30))
+            title, desc_extra, color = "🎉 Bạn thắng!", "\n💰 Bạn nhận **30 MICK**.", discord.Color.green()
+        else:
+            title, desc_extra, color = "💀 Bot thắng!", "", discord.Color.red()
+        return features.build_container(title=title, description=_tictactoe_board_text(board) + desc_extra, color=color)
+
+    if all(cell != _TICTACTOE_EMPTY for cell in board):
+        game["status"] = "draw"
+        game["finished_at"] = time.time()
+        return features.build_container(title="🤝 Hòa!", description=_tictactoe_board_text(board), color=discord.Color.yellow())
+
+    return None
 
 
 def _check_tictactoe_win(board: list, player: str) -> bool:

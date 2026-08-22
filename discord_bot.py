@@ -1053,6 +1053,9 @@ _QUEST_TRIGGERS = {
     "ghet_tomboy": "tôi ghét tomboy",
     "depchai_gay": "btw, i love <@1011257705031274536> because he's is my girlfriend and gay <3",
     "nsc_tree": "i love nsc because he crashed into a tree.",
+    "tim_ai": "i am tìm kiếm ai",
+    "ghet_chuTE": "tôi ghét chu tê",
+    "skibidi_femboy": "i am skibidi toilet and i play roleplay femboy",
 }
 
 
@@ -1651,6 +1654,22 @@ class GameLayoutView(discord.ui.LayoutView):
 
     async def on_timeout(self):
         self._disable_all_buttons()
+
+    async def _apply_move_result(self, interaction: discord.Interaction, game_id: str, container: discord.ui.Container, owner_id: int) -> None:
+        """Dùng chung cho các game kiểu "1 nút = 1 nước đi" (Tic-Tac-Toe,
+        High-Low, Minesweeper...): nếu ván đã kết thúc (status != "playing")
+        thì khoá hết nút + chạy hết ván (hoàn Vé/kết toán), ngược lại chỉ
+        cập nhật nội dung Container và để nguyên nút bấm cho lượt kế tiếp."""
+        game = _active_games.get(game_id)
+        if game and game["status"] != "playing":
+            self._disable_all_buttons()
+            await _append_ticket_footer(container, owner_id)
+            self._set_container(container)
+            await interaction.response.edit_message(view=self)
+            await _finish_minigame(interaction, owner_id)
+        else:
+            self._set_container(container)
+            await interaction.response.edit_message(view=self)
 
 
 class StopGameButton(discord.ui.Button):
@@ -2326,16 +2345,7 @@ class TicTacToeView(GameLayoutView):
             if container is None:
                 await interaction.response.send_message("Ô này đã có ký hiệu rồi!", ephemeral=True)
                 return
-            game = _active_games.get(self.game_id)
-            if game and game["status"] != "playing":
-                self._disable_all_buttons()
-                await _append_ticket_footer(container, self.owner_id)
-                self._set_container(container)
-                await interaction.response.edit_message(view=self)
-                await _finish_minigame(interaction, self.owner_id)
-            else:
-                self._set_container(container)
-                await interaction.response.edit_message(view=self)
+            await self._apply_move_result(interaction, self.game_id, container, self.owner_id)
         return callback
 
 
@@ -2396,16 +2406,7 @@ class HighLowView(GameLayoutView):
             if container is None:
                 await interaction.response.send_message("Ván không tồn tại!", ephemeral=True)
                 return
-            game = _active_games.get(self.game_id)
-            if game and game["status"] != "playing":
-                self._disable_all_buttons()
-                await _append_ticket_footer(container, self.owner_id)
-                self._set_container(container)
-                await interaction.response.edit_message(view=self)
-                await _finish_minigame(interaction, self.owner_id)
-            else:
-                self._set_container(container)
-                await interaction.response.edit_message(view=self)
+            await self._apply_move_result(interaction, self.game_id, container, self.owner_id)
         return callback
 
 
@@ -2429,16 +2430,7 @@ class MinesweeperView(GameLayoutView):
             if container is None:
                 await interaction.response.send_message("Ô này đã mở rồi!", ephemeral=True)
                 return
-            game = _active_games.get(self.game_id)
-            if game and game["status"] != "playing":
-                self._disable_all_buttons()
-                await _append_ticket_footer(container, self.owner_id)
-                self._set_container(container)
-                await interaction.response.edit_message(view=self)
-                await _finish_minigame(interaction, self.owner_id)
-            else:
-                self._set_container(container)
-                await interaction.response.edit_message(view=self)
+            await self._apply_move_result(interaction, self.game_id, container, self.owner_id)
         return callback
 
 
