@@ -74,6 +74,7 @@ from config import (
 )
 from tiktok_client import TikTokClient
 import db
+import economy
 import games_shop
 from games_shop import (
     start_emoji_riddle,
@@ -2152,7 +2153,7 @@ class GameChooserView(GameLayoutView):
         row3 = (
             ("Emoji Riddle", "🎨", discord.ButtonStyle.primary, self._btn_emoji_riddle),
             ("Cờ Caro (PvP)", "🎮", discord.ButtonStyle.success, self._btn_tictactoe),
-            ("Đua Ngựa", "🏇", discord.ButtonStyle.warning, self._btn_horse_race),
+            ("Đua Ngựa", "🏇", discord.ButtonStyle.secondary, self._btn_horse_race),
         )
         row4 = (
             ("Slot Machine", "🎰", discord.ButtonStyle.primary, self._btn_slot),
