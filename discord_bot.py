@@ -3264,6 +3264,39 @@ async def mick_shop_cmd(interaction: discord.Interaction):
 
 
 # ---------------------------------------------------------------------------
+# Slash commands: 8-Ball (Quả Cầu Tiên Tri) - hỏi 1 câu, bot random 1 câu trả
+# lời trong bộ có sẵn. Thuần vui, không đụng kinh tế/DB, không rate-limit.
+# ---------------------------------------------------------------------------
+
+_8BALL_ANSWERS = [
+    ("✅ Chắc chắn luôn!", discord.Color.green()),
+    ("✅ Không nghi ngờ gì cả.", discord.Color.green()),
+    ("✅ Có, và sớm thôi.", discord.Color.green()),
+    ("✅ Mọi dấu hiệu đều nói có.", discord.Color.green()),
+    ("🤔 Có thể lắm.", discord.Color.gold()),
+    ("🤔 Hỏi lại sau nhé.", discord.Color.gold()),
+    ("🤔 Giờ chưa nói được đâu.", discord.Color.gold()),
+    ("🤔 Tập trung rồi hỏi lại đi.", discord.Color.gold()),
+    ("❌ Đừng trông mong.", discord.Color.red()),
+    ("❌ Không đâu.", discord.Color.red()),
+    ("❌ Nguồn tin nói không khả quan.", discord.Color.red()),
+    ("❌ Rất đáng ngờ.", discord.Color.red()),
+]
+
+
+@tree.command(name="8-ball", description="Hỏi Quả Cầu Tiên Tri 1 câu, bot sẽ random câu trả lời")
+@discord.app_commands.describe(cau_hoi="Câu hỏi bạn muốn hỏi (vd: Hôm nay mình có may mắn không?)")
+async def eightball_cmd(interaction: discord.Interaction, cau_hoi: str):
+    answer, color = random.choice(_8BALL_ANSWERS)
+    container = features.build_container(
+        title="🔮 Quả Cầu Tiên Tri",
+        description=f"**Câu hỏi:** {cau_hoi}\n\n**Trả lời:** {answer}",
+        color=color,
+    )
+    await interaction.response.send_message(view=features.SimpleContainerLayout(container))
+
+
+# ---------------------------------------------------------------------------
 # Slash commands: Help - liệt kê toàn bộ lệnh theo nhóm, bấm nút để xem chi tiết
 # ---------------------------------------------------------------------------
 
@@ -3315,6 +3348,14 @@ _HELP_CATEGORIES = [
         "emoji": "🤫",
         "commands": [
             ("/confession", "Gửi 1 lời thú tội ẩn danh 100% vào kênh thú tội — nhập qua form"),
+        ],
+    },
+    {
+        "key": "fun",
+        "label": "Vui vẻ",
+        "emoji": "🔮",
+        "commands": [
+            ("/8-ball [cau_hoi]", "Hỏi Quả Cầu Tiên Tri 1 câu, bot random câu trả lời"),
         ],
     },
     {

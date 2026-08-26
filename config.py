@@ -86,7 +86,7 @@ DAILY_WINDOW_HOURS = int(os.environ.get("DAILY_WINDOW_HOURS", "12"))  # hết h�
 # DAILY_REPOST_AFTER_MESSAGES tin nhắn mới trong kênh Daily kể từ lần đăng
 # gần nhất, HOẶC nếu đã DAILY_REPOST_IDLE_HOURS giờ trôi qua mà chưa ai bump
 # lại (kênh vắng, tin Daily coi như đã bị quên) - miễn còn trong hạn nhận.
-DAILY_REPOST_AFTER_MESSAGES = int(os.environ.get("DAILY_REPOST_AFTER_MESSAGES", "10"))
+DAILY_REPOST_AFTER_MESSAGES = int(os.environ.get("DAILY_REPOST_AFTER_MESSAGES", "30"))
 DAILY_REPOST_IDLE_HOURS = float(os.environ.get("DAILY_REPOST_IDLE_HOURS", "3"))
 
 # Xác suất khi nhận Daily sẽ gặp 1 câu hỏi phụ (toán/câu đố dân gian) thay vì
