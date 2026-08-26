@@ -73,6 +73,7 @@ from config import (
     BUSINESS_MAX_STAFF,
     BUSINESS_TICK_SEC,
     TAIXIU_PAYOUT_MULTIPLIER,
+    COINFLIP_PAYOUT_MULTIPLIER,
     XIDACH_PAYOUT_MULTIPLIER,
     XIDACH_BONUS_MULTIPLIER,
     DAILY_TICKET_REWARD,
@@ -884,6 +885,7 @@ GAME_TYPE_LABELS = {
     "rps": "✊ Kéo Búa Bao",
     "taixiu": "🎲 Tài Xỉu",
     "xidach": "🃏 Xì Dách",
+    "coinflip": "🪙 Lật Đồng Xu",
     "trivia": "🧠 Trivia",
     "chanle": "🎲 Chẵn Lẻ",
     "doanmau": "🎨 Đoán Màu",
@@ -905,7 +907,7 @@ async def stop_game(game_id: str, user_id: int) -> tuple[bool, int | None]:
     """Dừng thủ công 1 ván đang chơi (nút Stop). Chỉ owner_id của ván mới dừng được.
 
     Trả (ok, refunded_amount). refunded_amount khác None nếu ván có cược tiền
-    (Tài Xỉu/Xì Dách) và tiền cược được hoàn lại vì ván chưa có kết quả.
+    (Tài Xỉu/Xì Dách/Lật Đồng Xu) và tiền cược được hoàn lại vì ván chưa có kết quả.
     Ván bị dừng được XOÁ NGAY khỏi _active_games (giải phóng Game ID ngay lập
     tức) thay vì chờ GC theo TTL như ván đã có kết quả tự nhiên.
     """
@@ -914,7 +916,7 @@ async def stop_game(game_id: str, user_id: int) -> tuple[bool, int | None]:
         return False, None
 
     refunded = None
-    if game["type"] in ("taixiu", "xidach") and game.get("bet"):
+    if game["type"] in ("taixiu", "xidach", "coinflip") and game.get("bet"):
         refunded = await economy.add_mick(user_id, game["bet"])
 
     _active_games.pop(game_id, None)
@@ -1444,6 +1446,70 @@ async def process_taixiu(game_id: str, choice: str) -> discord.ui.Container | No
 
 
 # ===========================================================================
+# Casino: Lật Đồng Xu (Coinflip) - 50/50 đơn giản, chọn Ngửa/Sấp. Cùng cơ chế
+# trừ tiền ngay lúc đặt (place_bet) như Tài Xỉu/Xì Dách. Trả thấp hơn x2 một
+# chút (COINFLIP_PAYOUT_MULTIPLIER, mặc định x1.9) để nhà cái giữ biên nhẹ,
+# tương tự cách các casino thật vận hành coinflip 50/50.
+# ===========================================================================
+
+
+def start_coinflip(user_id: int, bet: int, wallet_after_bet: int) -> tuple[str, discord.ui.Container]:
+    gid = _new_game_id()
+    _active_games[gid] = {
+        "type": "coinflip",
+        "owner_id": user_id,
+        "status": "playing",
+        "created_at": time.time(),
+        "bet": bet,
+    }
+    container = build_container(
+        title=f"🪙 Lật Đồng Xu · #{gid}",
+        description=(
+            f"Cược **{bet} MICK** đã bị trừ (số dư còn: **{wallet_after_bet}**).\n"
+            f"Chọn **Ngửa** hoặc **Sấp** bên dưới rồi bot tung đồng xu!"
+        ),
+        color=discord.Color.gold(),
+        footer=f"Thắng ăn x{COINFLIP_PAYOUT_MULTIPLIER:.1f} tiền cược",
+    )
+    return gid, container
+
+
+async def process_coinflip(game_id: str, choice: str) -> discord.ui.Container | None:
+    """choice: 'ngua' hoặc 'sap'. Trả None nếu ván không hợp lệ."""
+    game = _active_games.get(game_id)
+    if not game or game["type"] != "coinflip" or game["status"] != "playing":
+        return None
+
+    result = random.choice(("ngua", "sap"))
+    user_id = game["owner_id"]
+    bet = game["bet"]
+    result_text = "Ngửa 🌕" if result == "ngua" else "Sấp 🌑"
+
+    won = choice == result
+    if won:
+        payout = round(bet * COINFLIP_PAYOUT_MULTIPLIER)
+        new_balance = await economy.add_mick(user_id, payout)
+        desc = (
+            f"🪙 Đồng xu ra: **{result_text}**\n\n"
+            f"🎉 Bạn thắng! 💰 Bạn đã nhận **{payout} Mick** (số dư: {new_balance})"
+        )
+        color, status = discord.Color.green(), "won"
+    else:
+        desc = (
+            f"🪙 Đồng xu ra: **{result_text}**\n\n"
+            f"😵 Bạn thua, mất **{bet} MICK** đã cược."
+        )
+        color, status = discord.Color.red(), "lost"
+
+    game["status"] = status
+    game["finished_at"] = time.time()
+    game["summary"] = f"Cược {bet} MICK vào {choice} · Đồng xu ra {result} → {status}"
+
+    container = build_container(title=f"🪙 Lật Đồng Xu - Kết quả · #{game_id}", description=desc, color=color)
+    return container
+
+
+# ===========================================================================
 # Casino: Xì Dách (Blackjack rút gọn) - rút bài đấu bot, gần 21 nhất thắng,
 # quá 21 (quắc) thua luôn. Xì Bàng (2 lá = 21, có Át) hoặc Ngũ Linh (5 lá
 # không quắc) ăn x3, thắng thường ăn x2.
@@ -1615,6 +1681,28 @@ _TRIVIA_QUESTIONS = [
     {"q": "Nước nào có diện tích lớn nhất thế giới?", "options": ["Trung Quốc", "Mỹ", "Canada", "Nga"], "answer": 3},
     {"q": "Đơn vị đo tốc độ khung hình trong game thường gọi là gì?", "options": ["FPS", "MPH", "RPM", "GHz"], "answer": 0},
     {"q": "Số nào là số nguyên tố?", "options": ["9", "15", "17", "21"], "answer": 2},
+    {"q": "Việt Nam có bao nhiêu tỉnh/thành giáp biển?", "options": ["18", "28", "35", "40"], "answer": 1},
+    {"q": "Sông nào dài nhất Việt Nam?", "options": ["Sông Hồng", "Sông Mê Kông", "Sông Đồng Nai", "Sông Mã"], "answer": 1},
+    {"q": "1 năm ánh sáng dùng để đo đại lượng nào?", "options": ["Thời gian", "Khối lượng", "Khoảng cách", "Nhiệt độ"], "answer": 2},
+    {"q": "Kim loại nào nhẹ nhất trong các kim loại phổ biến?", "options": ["Nhôm", "Sắt", "Liti", "Đồng"], "answer": 2},
+    {"q": "Ai được coi là cha đẻ của thuyết tương đối?", "options": ["Newton", "Einstein", "Tesla", "Bohr"], "answer": 1},
+    {"q": "Trong bóng đá, 1 đội có tối đa bao nhiêu cầu thủ trên sân (kể cả thủ môn)?", "options": ["9", "10", "11", "12"], "answer": 2},
+    {"q": "HTML là viết tắt của gì?", "options": ["HyperText Markup Language", "HighText Machine Language", "HyperTransfer Markup Language", "HyperText Making Language"], "answer": 0},
+    {"q": "Núi nào cao nhất thế giới?", "options": ["K2", "Everest", "Fansipan", "Kilimanjaro"], "answer": 1},
+    {"q": "Đại dương nào lớn nhất thế giới?", "options": ["Đại Tây Dương", "Ấn Độ Dương", "Bắc Băng Dương", "Thái Bình Dương"], "answer": 3},
+    {"q": "1 tuần có bao nhiêu giờ?", "options": ["148", "156", "168", "172"], "answer": 2},
+    {"q": "Loài động vật nào lớn nhất hành tinh?", "options": ["Voi châu Phi", "Cá voi xanh", "Cá mập trắng", "Hươu cao cổ"], "answer": 1},
+    {"q": "GPU thường được dùng chủ yếu để làm gì trong máy tính?", "options": ["Lưu trữ dữ liệu", "Xử lý đồ họa", "Kết nối mạng", "Tản nhiệt"], "answer": 1},
+    {"q": "Ai là tác giả của 'Truyện Kiều'?", "options": ["Nguyễn Trãi", "Nguyễn Du", "Hồ Xuân Hương", "Nguyễn Đình Chiểu"], "answer": 1},
+    {"q": "Màu nào không có trong cầu vồng 7 sắc?", "options": ["Chàm", "Lục", "Hồng", "Cam"], "answer": 2},
+    {"q": "Đơn vị tiền tệ chính thức của Nhật Bản là gì?", "options": ["Yên", "Won", "Nhân dân tệ", "Baht"], "answer": 0},
+    {"q": "Trong 1 bộ bài Tây tiêu chuẩn có bao nhiêu lá?", "options": ["48", "52", "54", "56"], "answer": 1},
+    {"q": "Loài chim nào không biết bay?", "options": ["Đại bàng", "Chim cánh cụt", "Chim ưng", "Chim én"], "answer": 1},
+    {"q": "1 byte bằng bao nhiêu bit?", "options": ["4", "8", "16", "32"], "answer": 1},
+    {"q": "Kỳ quan nào trong 7 kỳ quan cổ đại còn tồn tại đến ngày nay?", "options": ["Vườn treo Babylon", "Đại kim tự tháp Giza", "Tượng thần Zeus", "Đền Artemis"], "answer": 1},
+    {"q": "Việt Nam giành huy chương vàng Olympic đầu tiên ở môn thể thao nào?", "options": ["Cử tạ", "Bắn súng", "Taekwondo", "Boxing"], "answer": 1},
+    {"q": "Quốc gia nào có dân số đông nhất thế giới hiện nay?", "options": ["Trung Quốc", "Mỹ", "Ấn Độ", "Indonesia"], "answer": 2},
+    {"q": "Trong hệ Mặt Trời, hành tinh nào được mệnh danh 'hành tinh đỏ'?", "options": ["Sao Kim", "Sao Hỏa", "Sao Thổ", "Sao Mộc"], "answer": 1},
 ]
 
 

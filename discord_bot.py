@@ -1927,7 +1927,7 @@ class VongQuayView(GameLayoutView):
 class BetAmountModal(discord.ui.Modal, title="Nhập số MICK muốn cược"):
     def __init__(self, game_kind: str):
         super().__init__()
-        self.game_kind = game_kind  # "taixiu" hoặc "xidach"
+        self.game_kind = game_kind  # "taixiu", "xidach" hoặc "coinflip"
         self.so_tien = discord.ui.TextInput(
             label="Số MICK muốn cược", max_length=10, placeholder="vd: 50"
         )
@@ -1955,6 +1955,12 @@ class BetAmountModal(discord.ui.Modal, title="Nhập số MICK muốn cược"):
             gid, container = features.start_taixiu(owner_id, bet, wallet_display)
             await _append_ticket_footer(container, owner_id)
             view = TaiXiuView(gid, owner_id)
+            view._set_container(container)
+            await interaction.response.send_message(view=view)
+        elif self.game_kind == "coinflip":
+            gid, container = features.start_coinflip(owner_id, bet, wallet_display)
+            await _append_ticket_footer(container, owner_id)
+            view = CoinflipView(gid, owner_id)
             view._set_container(container)
             await interaction.response.send_message(view=view)
         else:
@@ -1992,6 +1998,44 @@ class TaiXiuView(GameLayoutView):
 
     async def _play(self, interaction: discord.Interaction, choice: str):
         container = await features.process_taixiu(self.game_id, choice)
+        if container is None:
+            await interaction.response.send_message("❌ Ván này đã kết thúc hoặc không tồn tại!", ephemeral=True)
+            return
+        self._disable_all_buttons()
+        await _append_ticket_footer(container, self.owner_id)
+        self._set_container(container)
+        await interaction.response.edit_message(view=self)
+        await _finish_minigame(interaction, self.owner_id)
+        self.stop()
+
+
+class CoinflipView(GameLayoutView):
+    def __init__(self, game_id: str, owner_id: int):
+        super().__init__(timeout=60)
+        self.game_id = game_id
+        self.owner_id = owner_id
+        for label, emoji, style, choice in (
+            ("Ngửa", "🌕", discord.ButtonStyle.success, "ngua"),
+            ("Sấp", "🌑", discord.ButtonStyle.danger, "sap"),
+        ):
+            button = discord.ui.Button(label=label, emoji=emoji, style=style)
+            button.callback = self._make_callback(choice)
+            self._add_button(button)
+        self._add_button(StopGameButton(game_id, owner_id))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.owner_id:
+            await interaction.response.send_message("Đây không phải ván của bạn!", ephemeral=True)
+            return False
+        return True
+
+    def _make_callback(self, choice: str):
+        async def callback(interaction: discord.Interaction):
+            await self._play(interaction, choice)
+        return callback
+
+    async def _play(self, interaction: discord.Interaction, choice: str):
+        container = await features.process_coinflip(self.game_id, choice)
         if container is None:
             await interaction.response.send_message("❌ Ván này đã kết thúc hoặc không tồn tại!", ephemeral=True)
             return
@@ -2129,7 +2173,7 @@ class GameChooserView(GameLayoutView):
                 "### 🎮 Chọn minigame\n"
                 "Bấm nút bên dưới để chơi. Mỗi ván có 1 ID riêng, tra lại bằng `/check-game`.\n"
                 "Mọi ván đều có nút 🛑 **Dừng ván** nếu muốn thoát giữa chừng.\n\n"
-                "🎲 **Tài Xỉu** và 🃏 **Xì Dách** ăn thua MICK thật (cược tự do, miễn đủ số dư) — "
+                "🎲 **Tài Xỉu**, 🃏 **Xì Dách** và 🪙 **Lật Đồng Xu** ăn thua MICK thật (cược tự do, miễn đủ số dư) — "
                 "các game còn lại chơi miễn phí, thắng nhận thưởng cố định (riêng 🎡 **Vòng Quay May Mắn** "
                 "không bao giờ thua, chỉ random mức thưởng)."
             )
@@ -2160,7 +2204,10 @@ class GameChooserView(GameLayoutView):
             ("Cao/Thấp Bài Cào", "🃏", discord.ButtonStyle.danger, self._btn_high_low),
             ("Dò Mìn", "💣", discord.ButtonStyle.secondary, self._btn_minesweeper),
         )
-        for row_index, row_defs in enumerate((row0, row1, row2, row3, row4)):
+        row5 = (
+            ("Lật Đồng Xu (cược MICK)", "🪙", discord.ButtonStyle.danger, self._btn_coinflip),
+        )
+        for row_index, row_defs in enumerate((row0, row1, row2, row3, row4, row5)):
             for label, emoji, style, handler in row_defs:
                 button = discord.ui.Button(label=label, emoji=emoji, style=style)
                 button.callback = handler
@@ -2220,6 +2267,9 @@ class GameChooserView(GameLayoutView):
 
     async def _btn_xidach(self, interaction: discord.Interaction):
         await interaction.response.send_modal(BetAmountModal("xidach"))
+
+    async def _btn_coinflip(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(BetAmountModal("coinflip"))
 
     async def _btn_chanle(self, interaction: discord.Interaction):
         if not await _require_ticket(interaction):
@@ -2437,7 +2487,7 @@ class MinesweeperView(GameLayoutView):
 
 @tree.command(
     name="game",
-    description="Chơi minigame: Wordle, Đoán số, Kéo Búa Bao, Trivia, Tài Xỉu, Xì Dách, Chẵn Lẻ, Đoán Màu, Vòng Quay",
+    description="Chơi minigame: Wordle, Đoán số, Kéo Búa Bao, Trivia, Tài Xỉu, Xì Dách, Lật Đồng Xu, Chẵn Lẻ, Đoán Màu, Vòng Quay",
 )
 async def game_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(view=GameChooserView(interaction.user.id))
@@ -3235,7 +3285,7 @@ _HELP_CATEGORIES = [
         "label": "Minigame & Quest",
         "emoji": "🎮",
         "commands": [
-            ("/game", "Chơi Wordle · Đoán số · Kéo Búa Bao · Trivia · Chẵn Lẻ · Đoán Màu · Vòng Quay May Mắn · 🎲 Tài Xỉu · 🃏 Xì Dách (2 game cuối cược MICK thật)"),
+            ("/game", "Chơi Wordle · Đoán số · Kéo Búa Bao · Trivia · Chẵn Lẻ · Đoán Màu · Vòng Quay May Mắn · 🎲 Tài Xỉu · 🃏 Xì Dách · 🪙 Lật Đồng Xu (3 game cuối cược MICK thật)"),
             ("/check-game [id_van]", "Tra thông tin/trạng thái 1 ván minigame theo ID riêng"),
             ("/quest", "Xem quest hằng ngày của bạn"),
             ("/daily", "Nhận Daily ngay (phòng khi embed Daily bị trôi tin nhắn) - còn hạn tới 12h trưa"),

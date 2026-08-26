@@ -114,6 +114,8 @@ GAME_LOOKUP_TTL_SEC = int(os.environ.get("GAME_LOOKUP_TTL_SEC", "600"))
 
 # --- Casino: Tài Xỉu (thắng ăn x2 tiền cược) ---
 TAIXIU_PAYOUT_MULTIPLIER = float(os.environ.get("TAIXIU_PAYOUT_MULTIPLIER", "2.0"))
+# --- Lật Đồng Xu (Coinflip): cược tự do 50/50, thắng ăn x1.9 (nhà cái giữ ~5%) ---
+COINFLIP_PAYOUT_MULTIPLIER = float(os.environ.get("COINFLIP_PAYOUT_MULTIPLIER", "1.9"))
 
 # --- Casino: Xì Dách (thắng ăn x2, Xì Bàng/Ngũ Linh ăn x3) ---
 XIDACH_PAYOUT_MULTIPLIER = float(os.environ.get("XIDACH_PAYOUT_MULTIPLIER", "2.0"))
