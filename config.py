@@ -184,6 +184,15 @@ SHOP_EXPIRY_CHECK_SEC = int(os.environ.get("SHOP_EXPIRY_CHECK_SEC", "60"))
 TRANSFER_SECONDS_PER_MICK = float(os.environ.get("TRANSFER_SECONDS_PER_MICK", "0.05"))  # 0.05s/1 MICK
 TRANSFER_MIN_SECONDS = float(os.environ.get("TRANSFER_MIN_SECONDS", "2"))
 TRANSFER_MAX_SECONDS = float(os.environ.get("TRANSFER_MAX_SECONDS", "600"))  # trần 10 phút
+# Phí chuyển khoản: trừ thẳng vào số tiền TRƯỚC KHI cộng cho người nhận
+# (người gửi vẫn chỉ mất đúng số tiền đã nhập, phí bị "đốt" khỏi lưu thông,
+# không có quỹ chung nào giữ số phí này).
+TRANSFER_FEE_PERCENT = float(os.environ.get("TRANSFER_FEE_PERCENT", "2"))  # 2%
+
+# --- Lãi suất ATM: gửi càng lâu càng lời, cộng dồn kiểu lãi kép theo ngày,
+# tính lười (lazy) mỗi khi user tương tác ATM (gửi/rút/xem số dư), KHÔNG
+# cần vòng lặp nền riêng. ---
+ATM_INTEREST_RATE_PER_DAY = float(os.environ.get("ATM_INTEREST_RATE_PER_DAY", "0.5"))  # %/ngày
 
 # --- Thành tựu: khó <30 MICK, dễ >30 MICK (độ khó tỉ lệ NGHỊCH với thưởng) ---
 ACHIEVEMENT_HARD_REWARD_MAX = int(os.environ.get("ACHIEVEMENT_HARD_REWARD_MAX", "29"))

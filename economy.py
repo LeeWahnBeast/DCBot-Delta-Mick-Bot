@@ -7,10 +7,17 @@ Hệ thống kinh tế: tiền tệ MICK + level.
 """
 
 import asyncio
+import time
 from collections import defaultdict
 
 import db
-from config import LEVEL_UP_MICK_REWARD, BOT_OWNER_ID, GAME_TICKET_COST
+from config import (
+    LEVEL_UP_MICK_REWARD,
+    BOT_OWNER_ID,
+    GAME_TICKET_COST,
+    TRANSFER_FEE_PERCENT,
+    ATM_INTEREST_RATE_PER_DAY,
+)
 
 # Giá trị hiển thị cho MICK/Vé của chủ bot - không lưu số này xuống DB, chỉ
 # override lúc đọc/trừ để owner luôn thấy/dùng được "vô hạn" (∞).
@@ -32,6 +39,44 @@ _user_locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 def user_lock(user_id: int) -> asyncio.Lock:
     return _user_locks[user_id]
+
+
+# ---------------------------------------------------------------------------
+# Lịch sử giao dịch: tối đa TX_HISTORY_MAX dòng gần nhất/user, lưu ngay trong
+# doc user (field tx_history) để khỏi tốn thêm collection/query riêng. Owner
+# (MICK vô hạn) không cần lưu lịch sử.
+# ---------------------------------------------------------------------------
+
+TX_HISTORY_MAX = 15
+
+TX_TYPE_LABELS = {
+    "transfer_out": "📤 Chuyển đi",
+    "transfer_in": "📥 Nhận được",
+    "atm_deposit": "🏧 Gửi ATM",
+    "atm_withdraw": "🏧 Rút ATM",
+    "atm_interest": "📈 Lãi ATM",
+    "bet": "🎲 Đặt cược",
+}
+
+
+def _append_tx(user: dict, tx_type: str, amount, balance_after, note: str = "") -> list:
+    """Trả về list tx_history MỚI (đã thêm dòng này + cắt còn tối đa
+    TX_HISTORY_MAX dòng) - gọi trong cùng 1 db.save_user() với thay đổi số
+    dư để khỏi tốn thêm round-trip Firebase / tránh lệch dữ liệu do race."""
+    history = list(user.get("tx_history", []))
+    history.append({
+        "type": tx_type,
+        "amount": amount,
+        "balance_after": balance_after,
+        "note": note,
+        "at": int(time.time()),
+    })
+    return history[-TX_HISTORY_MAX:]
+
+
+async def get_tx_history(user_id: int) -> list:
+    user = await db.get_user(user_id)
+    return list(reversed(user.get("tx_history", [])))
 
 
 def xp_needed_for_level(level: int) -> int:
@@ -166,7 +211,13 @@ async def get_profile(user_id: int) -> dict:
 
 
 async def transfer_mick(from_id: int, to_id: int, amount: int) -> dict:
-    """Trừ MICK người gửi, cộng cho người nhận. Trả {ok, reason?, from_balance, to_balance}.
+    """Trừ MICK người gửi, cộng cho người nhận (đã trừ phí). Trả {ok, reason?,
+    from_balance, to_balance, fee, received}.
+
+    Phí chuyển khoản (TRANSFER_FEE_PERCENT) bị trừ thẳng vào số tiền TRƯỚC
+    KHI cộng cho người nhận - người gửi vẫn chỉ mất đúng `amount` đã nhập,
+    người nhận thực nhận `amount - fee`. Phí "bốc hơi" khỏi lưu thông, không
+    có quỹ chung nào giữ số này.
 
     Lock cả 2 user (theo thứ tự id tăng dần, cố định) để:
     - Check số dư + trừ tiền là 1 khối atomic -> spam lệnh nhiều lần không
@@ -179,6 +230,9 @@ async def transfer_mick(from_id: int, to_id: int, amount: int) -> dict:
     if from_id == to_id:
         return {"ok": False, "reason": "self_transfer"}
 
+    fee = max(0, round(amount * TRANSFER_FEE_PERCENT / 100))
+    received = max(0, amount - fee)
+
     first_id, second_id = sorted((from_id, to_id))
     async with user_lock(first_id):
         async with user_lock(second_id):
@@ -187,18 +241,77 @@ async def transfer_mick(from_id: int, to_id: int, amount: int) -> dict:
                 return {"ok": False, "reason": "insufficient_funds"}
 
             new_sender_balance = sender["mick"] - amount
-            await db.save_user(from_id, {"mick": new_sender_balance})
+            sender_tx = _append_tx(
+                sender, "transfer_out", -amount, new_sender_balance,
+                note=f"Đến <@{to_id}>" + (f", phí {fee}" if fee else ""),
+            )
+            await db.save_user(from_id, {"mick": new_sender_balance, "tx_history": sender_tx})
 
             receiver = await db.get_user(to_id)
-            new_receiver_balance = receiver["mick"] + amount
-            await db.save_user(to_id, {"mick": new_receiver_balance})
+            new_receiver_balance = receiver["mick"] + received
+            receiver_tx = _append_tx(
+                receiver, "transfer_in", received, new_receiver_balance,
+                note=f"Từ <@{from_id}>",
+            )
+            await db.save_user(to_id, {"mick": new_receiver_balance, "tx_history": receiver_tx})
 
-    return {"ok": True, "from_balance": new_sender_balance, "to_balance": new_receiver_balance}
+    return {
+        "ok": True,
+        "from_balance": new_sender_balance,
+        "to_balance": new_receiver_balance,
+        "fee": fee,
+        "received": received,
+    }
 
 
 # ---------------------------------------------------------------------------
 # ATM: giữ MICK hộ, tách khỏi ví tiêu xài (mick)
 # ---------------------------------------------------------------------------
+
+
+async def _apply_atm_interest(user_id: int, user: dict) -> dict:
+    """Cộng lãi ATM dồn từ lần cuối tính lãi đến giờ (lãi kép theo ngày,
+    ATM_INTEREST_RATE_PER_DAY %/ngày). Gọi lười (lazy) mỗi khi user tương
+    tác ATM (gửi/rút/xem số dư) - không cần vòng lặp nền riêng.
+
+    Trả về user dict đã cập nhật (atm_balance/atm_last_interest_at mới nếu
+    có lãi phát sinh, đã ghi DB kèm dòng lịch sử). Nếu chưa gửi ATM lần nào
+    hoặc chưa đủ 1 giờ trôi qua thì không làm gì (đỡ ghi DB liên tục)."""
+    atm = user.get("atm_balance", 0)
+    last_at = user.get("atm_last_interest_at", 0)
+    now = int(time.time())
+
+    if atm <= 0:
+        return user
+    if last_at <= 0:
+        # Lần đầu có tiền trong ATM nhưng chưa có mốc tính lãi -> chỉ đặt mốc,
+        # chưa cộng lãi (tránh lãi ảo tính từ epoch 0).
+        await db.save_user(user_id, {"atm_last_interest_at": now})
+        user["atm_last_interest_at"] = now
+        return user
+
+    elapsed_days = max(0.0, (now - last_at) / 86400)
+    if elapsed_days < (1 / 24):  # chưa đủ 1 tiếng, bỏ qua để đỡ tốn ghi Firebase
+        return user
+
+    rate = ATM_INTEREST_RATE_PER_DAY / 100
+    new_atm_float = atm * ((1 + rate) ** elapsed_days)
+    interest = round(new_atm_float - atm)
+    if interest <= 0:
+        await db.save_user(user_id, {"atm_last_interest_at": now})
+        user["atm_last_interest_at"] = now
+        return user
+
+    new_atm = atm + interest
+    tx = _append_tx(
+        user, "atm_interest", interest, new_atm,
+        note=f"Lãi {ATM_INTEREST_RATE_PER_DAY}%/ngày × {elapsed_days:.1f} ngày",
+    )
+    await db.save_user(user_id, {"atm_balance": new_atm, "atm_last_interest_at": now, "tx_history": tx})
+    user["atm_balance"] = new_atm
+    user["atm_last_interest_at"] = now
+    user["tx_history"] = tx
+    return user
 
 
 async def atm_deposit(user_id: int, amount: int) -> dict:
@@ -207,12 +320,17 @@ async def atm_deposit(user_id: int, amount: int) -> dict:
         return {"ok": False, "reason": "invalid_amount"}
     async with user_lock(user_id):
         user = await db.get_user(user_id)
+        user = await _apply_atm_interest(user_id, user)
         if user["mick"] < amount:
             return {"ok": False, "reason": "insufficient_funds"}
 
         wallet = user["mick"] - amount
         atm_balance = user["atm_balance"] + amount
-        await db.save_user(user_id, {"mick": wallet, "atm_balance": atm_balance})
+        tx = _append_tx(user, "atm_deposit", amount, atm_balance, note=f"Ví còn {wallet}")
+        data = {"mick": wallet, "atm_balance": atm_balance, "tx_history": tx}
+        if user.get("atm_last_interest_at", 0) <= 0:
+            data["atm_last_interest_at"] = int(time.time())
+        await db.save_user(user_id, data)
         return {"ok": True, "wallet": wallet, "atm": atm_balance}
 
 
@@ -222,17 +340,20 @@ async def atm_withdraw(user_id: int, amount: int) -> dict:
         return {"ok": False, "reason": "invalid_amount"}
     async with user_lock(user_id):
         user = await db.get_user(user_id)
+        user = await _apply_atm_interest(user_id, user)
         if user["atm_balance"] < amount:
             return {"ok": False, "reason": "insufficient_funds"}
 
         wallet = user["mick"] + amount
         atm_balance = user["atm_balance"] - amount
-        await db.save_user(user_id, {"mick": wallet, "atm_balance": atm_balance})
+        tx = _append_tx(user, "atm_withdraw", -amount, atm_balance, note=f"Ví còn {wallet}")
+        await db.save_user(user_id, {"mick": wallet, "atm_balance": atm_balance, "tx_history": tx})
         return {"ok": True, "wallet": wallet, "atm": atm_balance}
 
 
 async def get_atm_profile(user_id: int) -> dict:
     user = await db.get_user(user_id)
+    user = await _apply_atm_interest(user_id, user)
     return {"wallet": user["mick"], "atm": user["atm_balance"]}
 
 
@@ -264,5 +385,6 @@ async def place_bet(user_id: int, amount: int) -> dict:
         if user["mick"] < amount:
             return {"ok": False, "reason": "insufficient_funds"}
         wallet = user["mick"] - amount
-        await db.save_user(user_id, {"mick": wallet})
+        tx = _append_tx(user, "bet", -amount, wallet, note="Đặt cược")
+        await db.save_user(user_id, {"mick": wallet, "tx_history": tx})
         return {"ok": True, "wallet": wallet}

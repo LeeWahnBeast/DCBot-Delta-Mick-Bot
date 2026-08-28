@@ -59,6 +59,8 @@ from config import (
     GUESS_NUMBER_MAX,
     TRANSFER_OTP_LENGTH,
     TRANSFER_OTP_TTL_SEC,
+    TRANSFER_FEE_PERCENT,
+    ATM_INTEREST_RATE_PER_DAY,
     TRIVIA_TIMEOUT_SEC,
     TICKET_EMOJI,
     GAME_TICKET_COST,
@@ -130,237 +132,6 @@ async def on_tree_error(interaction: discord.Interaction, error: discord.app_com
 
 tiktok = TikTokClient()
 _last_xp_ts: dict[int, float] = {}
-
-# Cache RAM toàn bộ auto-respond (lệnh /autorespond) để dò khớp mỗi tin nhắn
-# mà không phải gọi Firebase liên tục. Nạp lại lúc on_ready, cập nhật ngay
-# mỗi khi tạo/xoá (xem _reload_autorespond_cache).
-_autorespond_cache: list[tuple[str, dict]] = []
-
-_AUTORESPOND_MODE_LABELS = {
-    "startswith": "Từ bắt đầu",
-    "case_sensitive": "Viết hoa",
-    "contains": "Không cần",
-    "whole_word": "Có từ",
-}
-
-
-def _autorespond_matches(mode: str, trigger: str, content: str, lowered: str) -> bool:
-    trigger_lowered = trigger.lower()
-    if mode == "startswith":
-        return lowered.startswith(trigger_lowered)
-    if mode == "case_sensitive":
-        return trigger in content
-    if mode == "whole_word":
-        return re.search(rf"\b{re.escape(trigger_lowered)}\b", lowered) is not None
-    # "contains" (mặc định / "không cần") - chỉ cần chứa cụm từ, không phân biệt hoa/thường
-    return trigger_lowered in lowered
-
-
-async def _reload_autorespond_cache():
-    global _autorespond_cache
-    _autorespond_cache = await db.get_all_autoresponses()
-
-
-async def _handle_autorespond(message: discord.Message, content: str, lowered: str):
-    for _doc_id, data in _autorespond_cache:
-        if data.get("guild_id") != message.guild.id:
-            continue
-        trigger = data.get("trigger") or ""
-        if not trigger:
-            continue
-        if not _autorespond_matches(data.get("mode", "contains"), trigger, content, lowered):
-            continue
-        emoji = (data.get("reply_emoji") or "").strip()
-        if emoji:
-            try:
-                await message.add_reaction(emoji)
-            except Exception as e:
-                log.warning("Auto-respond thả emoji lỗi (emoji=%s): %s", emoji, e)
-        reply_text = (data.get("reply_text") or "").strip()
-        image_url = data.get("image_url")
-        if reply_text or image_url:
-            embed = None
-            if image_url:
-                embed = discord.Embed()
-                embed.set_image(url=image_url)
-            try:
-                await message.reply(content=reply_text or None, embed=embed, mention_author=False)
-            except Exception as e:
-                log.warning("Auto-respond trả lời lỗi (trigger=%s): %s", trigger, e)
-        return  # mỗi tin nhắn chỉ khớp 1 auto-respond đầu tiên tìm thấy
-
-
-class _AutoRespondMatchModeView(discord.ui.View):
-    """Bước 2 sau khi submit modal /autorespond - Discord Modal không hỗ trợ
-    dropdown (Select) nên phải tách phần chọn kiểu khớp cụm từ ra 1 tin nhắn
-    ephemeral riêng, gửi ngay sau khi modal submit."""
-
-    def __init__(self, *, guild_id: int, author_id: int, trigger: str, reply_text: str,
-                 reply_emoji: str, image_url: str | None):
-        super().__init__(timeout=120)
-        self.guild_id = guild_id
-        self.author_id = author_id
-        self.trigger = trigger
-        self.reply_text = reply_text
-        self.reply_emoji = reply_emoji
-        self.image_url = image_url
-
-    @discord.ui.select(
-        placeholder="Chọn kiểu khớp cụm từ...",
-        options=[
-            discord.SelectOption(
-                label="Từ bắt đầu", value="startswith",
-                description="Tin nhắn phải BẮT ĐẦU bằng cụm từ", emoji="🔤",
-            ),
-            discord.SelectOption(
-                label="Viết hoa", value="case_sensitive",
-                description="Phải khớp đúng chữ Hoa/thường như đã nhập", emoji="🔠",
-            ),
-            discord.SelectOption(
-                label="Không cần", value="contains",
-                description="Chứa cụm từ ở bất kỳ đâu, không phân biệt hoa/thường", emoji="🔡",
-            ),
-            discord.SelectOption(
-                label="Có từ", value="whole_word",
-                description="Cụm từ phải đứng riêng (không dính liền chữ khác)", emoji="🔎",
-            ),
-        ],
-    )
-    async def _select_mode(self, interaction: discord.Interaction, select: discord.ui.Select):
-        if interaction.user.id != self.author_id:
-            await interaction.response.send_message(
-                "❌ Bạn không phải người đã tạo auto-respond này.", ephemeral=True
-            )
-            return
-        mode = select.values[0]
-        doc_id = f"{self.guild_id}_{secrets.token_hex(5)}"
-        data = {
-            "guild_id": self.guild_id,
-            "trigger": self.trigger,
-            "mode": mode,
-            "reply_text": self.reply_text,
-            "reply_emoji": self.reply_emoji,
-            "image_url": self.image_url,
-            "created_by": self.author_id,
-            "created_at": int(time.time()),
-        }
-        ok = await db.save_autoresponse(doc_id, data)
-        for item in self.children:
-            item.disabled = True
-        if ok:
-            _autorespond_cache.append((doc_id, data))
-            await interaction.response.edit_message(
-                content=(
-                    f"✅ Đã tạo auto-respond cho cụm từ **{self.trigger}** "
-                    f"(kiểu: {_AUTORESPOND_MODE_LABELS.get(mode, mode)})"
-                ),
-                view=self,
-            )
-        else:
-            await interaction.response.edit_message(
-                content="❌ Lưu auto-respond thất bại (lỗi kết nối Firebase), thử lại sau.",
-                view=self,
-            )
-        self.stop()
-
-    async def on_timeout(self):
-        for item in self.children:
-            item.disabled = True
-
-
-class _AutoRespondModal(discord.ui.Modal, title="Tạo Auto Respond"):
-    reply_text = discord.ui.TextInput(
-        label="Bot sẽ trả lời gì?",
-        style=discord.TextStyle.paragraph,
-        placeholder="Nội dung bot sẽ nhắn lại khi thấy cụm từ...",
-        max_length=2000,
-        required=True,
-    )
-    reply_emoji = discord.ui.TextInput(
-        label="Emoji thả vào tin nhắn (để trống nếu ko cần)",
-        style=discord.TextStyle.short,
-        placeholder="Vd: 👍 (chỉ nhận emoji Unicode, không nhận emoji custom của server khác)",
-        max_length=50,
-        required=False,
-    )
-
-    def __init__(self, *, trigger: str, image_url: str | None):
-        super().__init__()
-        self.trigger = trigger
-        self.image_url = image_url
-
-    async def on_submit(self, interaction: discord.Interaction):
-        view = _AutoRespondMatchModeView(
-            guild_id=interaction.guild_id,
-            author_id=interaction.user.id,
-            trigger=self.trigger,
-            reply_text=str(self.reply_text),
-            reply_emoji=str(self.reply_emoji).strip(),
-            image_url=self.image_url,
-        )
-        await interaction.response.send_message(
-            f"Cụm từ kích hoạt: **{self.trigger}**\nChọn kiểu khớp cụm từ bên dưới 👇",
-            view=view,
-            ephemeral=True,
-        )
-
-
-@tree.command(
-    name="autorespond",
-    description="Tạo auto-respond: bot tự trả lời/thả emoji khi thấy 1 cụm từ trong chat",
-)
-@discord.app_commands.describe(
-    cum_tu="Cụm từ để bot nhận diện trong tin nhắn (vd: alo)",
-    anh="Ảnh bot sẽ đính kèm khi trả lời (không bắt buộc)",
-)
-async def autorespond_cmd(interaction: discord.Interaction, cum_tu: str, anh: discord.Attachment = None):
-    if not interaction.user.guild_permissions.manage_guild:
-        await interaction.response.send_message(
-            "❌ Bạn cần quyền **Manage Server** để tạo auto-respond.", ephemeral=True
-        )
-        return
-    if anh is not None and not (anh.content_type or "").startswith("image/"):
-        await interaction.response.send_message("❌ File đính kèm phải là ảnh.", ephemeral=True)
-        return
-    modal = _AutoRespondModal(trigger=cum_tu, image_url=anh.url if anh else None)
-    await interaction.response.send_modal(modal)
-
-
-@tree.command(name="autorespond-list", description="Xem danh sách auto-respond đang hoạt động trong server")
-async def autorespond_list_cmd(interaction: discord.Interaction):
-    items = [d for _id, d in _autorespond_cache if d.get("guild_id") == interaction.guild_id]
-    if not items:
-        await interaction.response.send_message("Server chưa có auto-respond nào.", ephemeral=True)
-        return
-    lines = [
-        f"• **{d.get('trigger')}** — {_AUTORESPOND_MODE_LABELS.get(d.get('mode'), d.get('mode'))}"
-        for d in items
-    ]
-    await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
-
-
-@tree.command(name="autorespond-xoa", description="Xoá 1 auto-respond theo đúng cụm từ")
-@discord.app_commands.describe(cum_tu="Cụm từ đúng như lúc tạo (xem /autorespond-list)")
-async def autorespond_xoa_cmd(interaction: discord.Interaction, cum_tu: str):
-    if not interaction.user.guild_permissions.manage_guild:
-        await interaction.response.send_message(
-            "❌ Bạn cần quyền **Manage Server** để xoá auto-respond.", ephemeral=True
-        )
-        return
-    match = next(
-        (
-            (doc_id, d) for doc_id, d in _autorespond_cache
-            if d.get("guild_id") == interaction.guild_id and d.get("trigger") == cum_tu
-        ),
-        None,
-    )
-    if match is None:
-        await interaction.response.send_message("Không tìm thấy auto-respond với cụm từ này.", ephemeral=True)
-        return
-    doc_id, _data = match
-    await db.delete_autoresponse(doc_id)
-    _autorespond_cache[:] = [(i, d) for i, d in _autorespond_cache if i != doc_id]
-    await interaction.response.send_message(f"✅ Đã xoá auto-respond cho cụm từ **{cum_tu}**.", ephemeral=True)
 
 
 
@@ -445,12 +216,6 @@ async def on_ready():
             await _refresh_invite_cache(guild)
     except Exception as e:
         log.warning("Refresh invite cache lỗi: %s", e)
-
-    try:
-        await _reload_autorespond_cache()
-        log.info("Đã nạp %d auto-respond.", len(_autorespond_cache))
-    except Exception as e:
-        log.warning("Nạp cache auto-respond lỗi: %s", e)
 
 
 def get_bot_info() -> dict:
@@ -1452,9 +1217,6 @@ async def on_message(message: discord.Message):
     # AI Chat: reply hoặc tag bot
     if ai_chat.wants_bot_reply(message, client.user):
         _fire_and_forget(_handle_ai_reply(message), "AI reply lỗi")
-
-    if _autorespond_cache:
-        _fire_and_forget(_handle_autorespond(message, content, lowered), "Auto-respond lỗi")
 
     _maybe_grant_xp(message)
     _mark_active_today(message.author.id)
@@ -3006,13 +2768,14 @@ class TransferOtpModal(discord.ui.Modal, title="Xác minh chuyển tiền"):
 
         result = await economy.transfer_mick(self.sender_id, self.receiver.id, self.amount)
         if result["ok"]:
+            fee_note = f" (phí {result['fee']} MICK)" if result["fee"] else ""
             await interaction.followup.send(
-                f"✅ Đã chuyển **{self.amount} MICK** từ <@{self.sender_id}> đến {self.receiver.mention}!\n"
+                f"✅ Đã chuyển **{self.amount} MICK** từ <@{self.sender_id}> đến {self.receiver.mention}!{fee_note}\n"
                 f"Số dư người gửi: **{result['from_balance']} MICK**"
             )
             try:
                 await self.receiver.send(
-                    f"💰 Bạn đã nhận **{self.amount} Mick** từ <@{self.sender_id}>! "
+                    f"💰 Bạn đã nhận **{result['received']} Mick** từ <@{self.sender_id}>! "
                     f"Số dư hiện tại: **{result['to_balance']} MICK**"
                 )
             except Exception:
@@ -3094,6 +2857,8 @@ async def transfer_cmd(interaction: discord.Interaction, nguoi_nhan: discord.Mem
         return
 
     code = features.create_transfer_otp(interaction.user.id, nguoi_nhan.id, so_tien)
+    fee = max(0, round(so_tien * TRANSFER_FEE_PERCENT / 100))
+    received = max(0, so_tien - fee)
     try:
         await interaction.user.send(
             f"🔐 Mã OTP xác minh chuyển **{so_tien} MICK** cho {nguoi_nhan.mention}: **{code}**\n"
@@ -3107,15 +2872,16 @@ async def transfer_cmd(interaction: discord.Interaction, nguoi_nhan: discord.Mem
         )
         return
 
+    fee_note = f" (phí {TRANSFER_FEE_PERCENT:g}% = **{fee} MICK**, người nhận nhận **{received} MICK**)" if fee else ""
     await interaction.response.send_message(
         f"📨 Đã gửi mã OTP qua DM. Nhập mã trong **{TRANSFER_OTP_TTL_SEC} giây** để xác nhận chuyển "
-        f"**{so_tien} MICK** cho {nguoi_nhan.mention}.",
+        f"**{so_tien} MICK** cho {nguoi_nhan.mention}.{fee_note}",
         view=TransferOtpView(interaction.user.id, nguoi_nhan, so_tien),
         ephemeral=True,
     )
 
 
-@tree.command(name="atm", description="Gửi/rút MICK vào ATM (giữ tiền hộ, tách khỏi ví tiêu xài)")
+@tree.command(name="atm", description="Gửi/rút MICK vào ATM (giữ tiền hộ, tách khỏi ví, có lãi suất theo ngày)")
 @discord.app_commands.describe(hanh_dong="Gửi hay rút", so_tien="Số MICK")
 @discord.app_commands.choices(hanh_dong=[
     discord.app_commands.Choice(name="Gửi (deposit)", value="deposit"),
@@ -3131,6 +2897,7 @@ async def atm_cmd(interaction: discord.Interaction, hanh_dong: discord.app_comma
             fields=[
                 ("Ví (tiêu xài)", f"{info['wallet']} 🪙"),
                 ("ATM (giữ hộ)", f"{info['atm']} 🪙"),
+                ("Lãi suất", f"{ATM_INTEREST_RATE_PER_DAY:g}%/ngày, cộng dồn tự động"),
             ],
         )
         await interaction.response.send_message(view=features.SimpleContainerLayout(container), ephemeral=True)
@@ -3154,6 +2921,37 @@ async def atm_cmd(interaction: discord.Interaction, hanh_dong: discord.app_comma
         )
     else:
         await interaction.response.send_message("❌ Không đủ MICK để thực hiện!", ephemeral=True)
+
+
+@tree.command(name="giao-dich", description="Xem lịch sử giao dịch MICK gần đây của bạn (chuyển khoản, ATM, cược)")
+async def giao_dich_cmd(interaction: discord.Interaction):
+    if economy.is_owner(interaction.user.id):
+        await interaction.response.send_message(
+            "Owner có MICK vô hạn nên không lưu lịch sử giao dịch.", ephemeral=True
+        )
+        return
+
+    history = await economy.get_tx_history(interaction.user.id)
+    if not history:
+        await interaction.response.send_message("Bạn chưa có giao dịch nào.", ephemeral=True)
+        return
+
+    lines = []
+    for tx in history[:economy.TX_HISTORY_MAX]:
+        label = economy.TX_TYPE_LABELS.get(tx.get("type"), tx.get("type", "?"))
+        amt = tx.get("amount", 0)
+        sign = "+" if amt >= 0 else ""
+        note = f" — {tx['note']}" if tx.get("note") else ""
+        ts = f"<t:{tx.get('at', 0)}:R>" if tx.get("at") else ""
+        lines.append(f"{label}: **{sign}{amt} MICK** (số dư: {tx.get('balance_after', '?')}){note} · {ts}")
+
+    container = features.build_container(
+        title="📒 Lịch sử giao dịch MICK",
+        description="\n".join(lines),
+        color=discord.Color.gold(),
+        footer=f"Hiển thị {min(len(history), economy.TX_HISTORY_MAX)} giao dịch gần nhất",
+    )
+    await interaction.response.send_message(view=features.SimpleContainerLayout(container), ephemeral=True)
 
 
 # ---------------------------------------------------------------------------
