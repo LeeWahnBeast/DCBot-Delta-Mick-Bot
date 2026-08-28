@@ -439,6 +439,36 @@ async def get_all_shop_purchases() -> list[tuple[str, dict]]:
 
 
 # ---------------------------------------------------------------------------
+# auto_responses: cụm từ kích hoạt -> bot tự trả lời / thả emoji (lệnh /autorespond)
+# ---------------------------------------------------------------------------
+
+
+async def get_all_autoresponses() -> list[tuple[str, dict]]:
+    """Trả về [(doc_id, data), ...] toàn bộ auto-respond đang có, dùng để dò
+    khớp mỗi khi có tin nhắn mới (xem on_message trong discord_bot.py)."""
+    if _use_memory_fallback:
+        out = []
+        for key, val in _memory_store.items():
+            if key.startswith("auto_responses/"):
+                out.append((key.split("/", 1)[1], dict(val)))
+        return out
+    try:
+        data, ok = await _rtdb_request("GET", "auto_responses")
+        return list((data or {}).items()) if ok else []
+    except Exception as e:
+        _warn_throttled("đọc toàn bộ auto_responses", str(e))
+        return []
+
+
+async def save_autoresponse(doc_id: str, data: dict) -> bool:
+    return await _set_doc("auto_responses", doc_id, data, merge=False)
+
+
+async def delete_autoresponse(doc_id: str) -> bool:
+    return await _delete_doc("auto_responses", doc_id)
+
+
+# ---------------------------------------------------------------------------
 # users: MICK, XP, level, Daily
 # ---------------------------------------------------------------------------
 

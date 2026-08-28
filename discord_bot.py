@@ -20,6 +20,7 @@ JS-VM hoặc dịch vụ trả phí). Chỉ còn giữ thông báo LIVE, vẫn d
 import asyncio
 import math
 import random
+import re
 import secrets
 import time
 from datetime import datetime, timedelta, timezone
@@ -110,8 +111,258 @@ intents.presences = True  # cần để đọc trạng thái Online/Idle/DND/Off
 client = discord.Client(intents=intents)
 tree = discord.app_commands.CommandTree(client)
 
+
+@tree.error
+async def on_tree_error(interaction: discord.Interaction, error: discord.app_commands.AppCommandError):
+    # QUAN TRỌNG: nếu không có handler này, mọi lỗi xảy ra TRONG lúc chạy 1
+    # slash command (VD Firebase timeout, thiếu quyền, bug code...) sẽ chỉ
+    # được discord.py log ra console và người dùng thấy "Ứng dụng không phản
+    # hồi" mà không rõ lý do gì - trông giống như "lệnh không chạy".
+    log.error("Lỗi khi chạy lệnh /%s: %s", getattr(interaction.command, "name", "?"), error)
+    msg = "❌ Có lỗi xảy ra khi chạy lệnh này. Vui lòng thử lại sau."
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(msg, ephemeral=True)
+        else:
+            await interaction.response.send_message(msg, ephemeral=True)
+    except Exception:
+        pass  # interaction đã hết hạn/không gửi được, bỏ qua
+
 tiktok = TikTokClient()
 _last_xp_ts: dict[int, float] = {}
+
+# Cache RAM toàn bộ auto-respond (lệnh /autorespond) để dò khớp mỗi tin nhắn
+# mà không phải gọi Firebase liên tục. Nạp lại lúc on_ready, cập nhật ngay
+# mỗi khi tạo/xoá (xem _reload_autorespond_cache).
+_autorespond_cache: list[tuple[str, dict]] = []
+
+_AUTORESPOND_MODE_LABELS = {
+    "startswith": "Từ bắt đầu",
+    "case_sensitive": "Viết hoa",
+    "contains": "Không cần",
+    "whole_word": "Có từ",
+}
+
+
+def _autorespond_matches(mode: str, trigger: str, content: str, lowered: str) -> bool:
+    trigger_lowered = trigger.lower()
+    if mode == "startswith":
+        return lowered.startswith(trigger_lowered)
+    if mode == "case_sensitive":
+        return trigger in content
+    if mode == "whole_word":
+        return re.search(rf"\b{re.escape(trigger_lowered)}\b", lowered) is not None
+    # "contains" (mặc định / "không cần") - chỉ cần chứa cụm từ, không phân biệt hoa/thường
+    return trigger_lowered in lowered
+
+
+async def _reload_autorespond_cache():
+    global _autorespond_cache
+    _autorespond_cache = await db.get_all_autoresponses()
+
+
+async def _handle_autorespond(message: discord.Message, content: str, lowered: str):
+    for _doc_id, data in _autorespond_cache:
+        if data.get("guild_id") != message.guild.id:
+            continue
+        trigger = data.get("trigger") or ""
+        if not trigger:
+            continue
+        if not _autorespond_matches(data.get("mode", "contains"), trigger, content, lowered):
+            continue
+        emoji = (data.get("reply_emoji") or "").strip()
+        if emoji:
+            try:
+                await message.add_reaction(emoji)
+            except Exception as e:
+                log.warning("Auto-respond thả emoji lỗi (emoji=%s): %s", emoji, e)
+        reply_text = (data.get("reply_text") or "").strip()
+        image_url = data.get("image_url")
+        if reply_text or image_url:
+            embed = None
+            if image_url:
+                embed = discord.Embed()
+                embed.set_image(url=image_url)
+            try:
+                await message.reply(content=reply_text or None, embed=embed, mention_author=False)
+            except Exception as e:
+                log.warning("Auto-respond trả lời lỗi (trigger=%s): %s", trigger, e)
+        return  # mỗi tin nhắn chỉ khớp 1 auto-respond đầu tiên tìm thấy
+
+
+class _AutoRespondMatchModeView(discord.ui.View):
+    """Bước 2 sau khi submit modal /autorespond - Discord Modal không hỗ trợ
+    dropdown (Select) nên phải tách phần chọn kiểu khớp cụm từ ra 1 tin nhắn
+    ephemeral riêng, gửi ngay sau khi modal submit."""
+
+    def __init__(self, *, guild_id: int, author_id: int, trigger: str, reply_text: str,
+                 reply_emoji: str, image_url: str | None):
+        super().__init__(timeout=120)
+        self.guild_id = guild_id
+        self.author_id = author_id
+        self.trigger = trigger
+        self.reply_text = reply_text
+        self.reply_emoji = reply_emoji
+        self.image_url = image_url
+
+    @discord.ui.select(
+        placeholder="Chọn kiểu khớp cụm từ...",
+        options=[
+            discord.SelectOption(
+                label="Từ bắt đầu", value="startswith",
+                description="Tin nhắn phải BẮT ĐẦU bằng cụm từ", emoji="🔤",
+            ),
+            discord.SelectOption(
+                label="Viết hoa", value="case_sensitive",
+                description="Phải khớp đúng chữ Hoa/thường như đã nhập", emoji="🔠",
+            ),
+            discord.SelectOption(
+                label="Không cần", value="contains",
+                description="Chứa cụm từ ở bất kỳ đâu, không phân biệt hoa/thường", emoji="🔡",
+            ),
+            discord.SelectOption(
+                label="Có từ", value="whole_word",
+                description="Cụm từ phải đứng riêng (không dính liền chữ khác)", emoji="🔎",
+            ),
+        ],
+    )
+    async def _select_mode(self, interaction: discord.Interaction, select: discord.ui.Select):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                "❌ Bạn không phải người đã tạo auto-respond này.", ephemeral=True
+            )
+            return
+        mode = select.values[0]
+        doc_id = f"{self.guild_id}_{secrets.token_hex(5)}"
+        data = {
+            "guild_id": self.guild_id,
+            "trigger": self.trigger,
+            "mode": mode,
+            "reply_text": self.reply_text,
+            "reply_emoji": self.reply_emoji,
+            "image_url": self.image_url,
+            "created_by": self.author_id,
+            "created_at": int(time.time()),
+        }
+        ok = await db.save_autoresponse(doc_id, data)
+        for item in self.children:
+            item.disabled = True
+        if ok:
+            _autorespond_cache.append((doc_id, data))
+            await interaction.response.edit_message(
+                content=(
+                    f"✅ Đã tạo auto-respond cho cụm từ **{self.trigger}** "
+                    f"(kiểu: {_AUTORESPOND_MODE_LABELS.get(mode, mode)})"
+                ),
+                view=self,
+            )
+        else:
+            await interaction.response.edit_message(
+                content="❌ Lưu auto-respond thất bại (lỗi kết nối Firebase), thử lại sau.",
+                view=self,
+            )
+        self.stop()
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+
+
+class _AutoRespondModal(discord.ui.Modal, title="Tạo Auto Respond"):
+    reply_text = discord.ui.TextInput(
+        label="Bot sẽ trả lời gì?",
+        style=discord.TextStyle.paragraph,
+        placeholder="Nội dung bot sẽ nhắn lại khi thấy cụm từ...",
+        max_length=2000,
+        required=True,
+    )
+    reply_emoji = discord.ui.TextInput(
+        label="Emoji thả vào tin nhắn (để trống nếu ko cần)",
+        style=discord.TextStyle.short,
+        placeholder="Vd: 👍 (chỉ nhận emoji Unicode, không nhận emoji custom của server khác)",
+        max_length=50,
+        required=False,
+    )
+
+    def __init__(self, *, trigger: str, image_url: str | None):
+        super().__init__()
+        self.trigger = trigger
+        self.image_url = image_url
+
+    async def on_submit(self, interaction: discord.Interaction):
+        view = _AutoRespondMatchModeView(
+            guild_id=interaction.guild_id,
+            author_id=interaction.user.id,
+            trigger=self.trigger,
+            reply_text=str(self.reply_text),
+            reply_emoji=str(self.reply_emoji).strip(),
+            image_url=self.image_url,
+        )
+        await interaction.response.send_message(
+            f"Cụm từ kích hoạt: **{self.trigger}**\nChọn kiểu khớp cụm từ bên dưới 👇",
+            view=view,
+            ephemeral=True,
+        )
+
+
+@tree.command(
+    name="autorespond",
+    description="Tạo auto-respond: bot tự trả lời/thả emoji khi thấy 1 cụm từ trong chat",
+)
+@discord.app_commands.describe(
+    cum_tu="Cụm từ để bot nhận diện trong tin nhắn (vd: alo)",
+    anh="Ảnh bot sẽ đính kèm khi trả lời (không bắt buộc)",
+)
+async def autorespond_cmd(interaction: discord.Interaction, cum_tu: str, anh: discord.Attachment = None):
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message(
+            "❌ Bạn cần quyền **Manage Server** để tạo auto-respond.", ephemeral=True
+        )
+        return
+    if anh is not None and not (anh.content_type or "").startswith("image/"):
+        await interaction.response.send_message("❌ File đính kèm phải là ảnh.", ephemeral=True)
+        return
+    modal = _AutoRespondModal(trigger=cum_tu, image_url=anh.url if anh else None)
+    await interaction.response.send_modal(modal)
+
+
+@tree.command(name="autorespond-list", description="Xem danh sách auto-respond đang hoạt động trong server")
+async def autorespond_list_cmd(interaction: discord.Interaction):
+    items = [d for _id, d in _autorespond_cache if d.get("guild_id") == interaction.guild_id]
+    if not items:
+        await interaction.response.send_message("Server chưa có auto-respond nào.", ephemeral=True)
+        return
+    lines = [
+        f"• **{d.get('trigger')}** — {_AUTORESPOND_MODE_LABELS.get(d.get('mode'), d.get('mode'))}"
+        for d in items
+    ]
+    await interaction.response.send_message("\n".join(lines)[:1900], ephemeral=True)
+
+
+@tree.command(name="autorespond-xoa", description="Xoá 1 auto-respond theo đúng cụm từ")
+@discord.app_commands.describe(cum_tu="Cụm từ đúng như lúc tạo (xem /autorespond-list)")
+async def autorespond_xoa_cmd(interaction: discord.Interaction, cum_tu: str):
+    if not interaction.user.guild_permissions.manage_guild:
+        await interaction.response.send_message(
+            "❌ Bạn cần quyền **Manage Server** để xoá auto-respond.", ephemeral=True
+        )
+        return
+    match = next(
+        (
+            (doc_id, d) for doc_id, d in _autorespond_cache
+            if d.get("guild_id") == interaction.guild_id and d.get("trigger") == cum_tu
+        ),
+        None,
+    )
+    if match is None:
+        await interaction.response.send_message("Không tìm thấy auto-respond với cụm từ này.", ephemeral=True)
+        return
+    doc_id, _data = match
+    await db.delete_autoresponse(doc_id)
+    _autorespond_cache[:] = [(i, d) for i, d in _autorespond_cache if i != doc_id]
+    await interaction.response.send_message(f"✅ Đã xoá auto-respond cho cụm từ **{cum_tu}**.", ephemeral=True)
+
+
 
 # Đánh dấu user "có online/nhắn tin hôm nay" (giờ VN) - dùng để chốt chuỗi
 # Daily (xem features.finalize_daily_streaks): phân biệt "quên điểm danh"
@@ -137,8 +388,17 @@ async def on_ready():
     client.add_view(features.DailyClaimView())  # persistent view, sống sót qua restart
 
     if not _synced:
-        await tree.sync()
-        _synced = True
+        try:
+            synced_cmds = await tree.sync()
+            log.info("Đã sync %d slash command với Discord.", len(synced_cmds))
+            _synced = True
+        except Exception as e:
+            # QUAN TRỌNG: nếu không bọc try/except ở đây, 1 lỗi sync (rate
+            # limit 429, permission thiếu, hoặc Discord từ chối 1 command) sẽ
+            # NÉM EXCEPTION làm dừng toàn bộ on_ready ngay tại đây - mọi thứ
+            # phía dưới (các loop, refresh invite...) sẽ KHÔNG chạy, và lệnh
+            # slash sẽ không được đăng ký -> bấm lệnh nào cũng không phản hồi.
+            log.error("Sync slash command THẤT BẠI, bot sẽ thử lại ở lần reconnect sau: %s", e)
 
     if not _version_checked:
         _version_checked = True
@@ -156,28 +416,41 @@ async def on_ready():
         except Exception as e:
             log.warning("Kiểm tra version bot lỗi: %s", e)
 
-    if not check_tiktok_loop.is_running():
-        check_tiktok_loop.start()
-    if not sync_identity_loop.is_running():
-        sync_identity_loop.start()
-    if not daily_loop.is_running():
-        daily_loop.start()
-    if not business_tick_loop.is_running():
-        business_tick_loop.start()
-    if not shop_expiry_loop.is_running():
-        shop_expiry_loop.start()
-    if not ai_auto_chat_loop.is_running():
-        ai_auto_chat_loop.start()
-    if not voice_xp_loop.is_running():
-        voice_xp_loop.start()
-    if not learn_word_flush_loop.is_running():
-        learn_word_flush_loop.start()
-        guess_meaning_loop.start()
-    if not anniversary_loop.is_running():
-        anniversary_loop.start()
-    guild = client.get_guild(DISCORD_GUILD_ID)
-    if guild is not None:
-        await _refresh_invite_cache(guild)
+    try:
+        if not check_tiktok_loop.is_running():
+            check_tiktok_loop.start()
+        if not sync_identity_loop.is_running():
+            sync_identity_loop.start()
+        if not daily_loop.is_running():
+            daily_loop.start()
+        if not business_tick_loop.is_running():
+            business_tick_loop.start()
+        if not shop_expiry_loop.is_running():
+            shop_expiry_loop.start()
+        if not ai_auto_chat_loop.is_running():
+            ai_auto_chat_loop.start()
+        if not voice_xp_loop.is_running():
+            voice_xp_loop.start()
+        if not learn_word_flush_loop.is_running():
+            learn_word_flush_loop.start()
+            guess_meaning_loop.start()
+        if not anniversary_loop.is_running():
+            anniversary_loop.start()
+    except Exception as e:
+        log.error("Khởi động background loop lỗi: %s", e)
+
+    try:
+        guild = client.get_guild(DISCORD_GUILD_ID)
+        if guild is not None:
+            await _refresh_invite_cache(guild)
+    except Exception as e:
+        log.warning("Refresh invite cache lỗi: %s", e)
+
+    try:
+        await _reload_autorespond_cache()
+        log.info("Đã nạp %d auto-respond.", len(_autorespond_cache))
+    except Exception as e:
+        log.warning("Nạp cache auto-respond lỗi: %s", e)
 
 
 def get_bot_info() -> dict:
@@ -1179,6 +1452,9 @@ async def on_message(message: discord.Message):
     # AI Chat: reply hoặc tag bot
     if ai_chat.wants_bot_reply(message, client.user):
         _fire_and_forget(_handle_ai_reply(message), "AI reply lỗi")
+
+    if _autorespond_cache:
+        _fire_and_forget(_handle_autorespond(message, content, lowered), "Auto-respond lỗi")
 
     _maybe_grant_xp(message)
     _mark_active_today(message.author.id)
@@ -2487,7 +2763,7 @@ class MinesweeperView(GameLayoutView):
 
 @tree.command(
     name="game",
-    description="Chơi minigame: Wordle, Đoán số, Kéo Búa Bao, Trivia, Tài Xỉu, Xì Dách, Lật Đồng Xu, Chẵn Lẻ, Đoán Màu, Vòng Quay",
+    description="Chơi minigame: Wordle, Đoán số, Kéo Búa Bao, Tài Xỉu, Xì Dách, Chẵn Lẻ, Vòng Quay...",
 )
 async def game_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(view=GameChooserView(interaction.user.id))
