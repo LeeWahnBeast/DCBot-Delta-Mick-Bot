@@ -95,7 +95,7 @@ async def accept_challenge(challenge_id: str, accepter_id: int) -> dict:
     r2 = await economy.place_bet(accepter_id, bet)
     if not r2["ok"]:
         # hoàn tiền lại cho challenger vì opponent không đủ tiền vào phút chót
-        await economy.add_mick(challenge["challenger_id"], bet)
+        await economy.add_mick(challenge["challenger_id"], bet, count_for_season=False)
         _pending_challenges.pop(challenge_id, None)
         return {"ok": False, "reason": "opponent_funds_changed"}
 
@@ -172,9 +172,10 @@ async def _finalize_match(challenge_id: str, winner_id: int | None, extra_note: 
     pool = bet * 2
 
     if winner_id is None:
-        # Hoà: hoàn tiền cược lại cho cả 2, không thu phí
-        await economy.add_mick(challenger_id, bet)
-        await economy.add_mick(opponent_id, bet)
+        # Hoà: hoàn tiền cược lại cho cả 2, không thu phí (không tính điểm mùa
+        # vì đây là hoàn tiền, không phải thu nhập mới)
+        await economy.add_mick(challenger_id, bet, count_for_season=False)
+        await economy.add_mick(opponent_id, bet, count_for_season=False)
         return {
             "ok": True, "result": "draw", "note": extra_note,
             "bet": bet, "winner_id": None,

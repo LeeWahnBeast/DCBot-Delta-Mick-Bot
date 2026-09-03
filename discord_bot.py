@@ -35,9 +35,6 @@ from config import (
     NOTIFY_MENTION,
     CHECK_INTERVAL_SEC,
     IDENTITY_SYNC_INTERVAL_SEC,
-    AI_GUESS_MEANING_INTERVAL_SEC,
-    AI_GUESS_MEANING_BATCH_SIZE,
-    AI_GUESS_MEANING_MIN_COUNT,
     GUILD_NAME_TEMPLATE,
     DAILY_CHANNEL_ID,
     XP_MIN_PER_MESSAGE,
@@ -73,6 +70,7 @@ from config import (
     WELCOME_CHANNEL_ID,
     BOT_ROLE_ID,
     SHOP_EXPIRY_CHECK_SEC,
+    AI_GIFT_DAILY_LIMIT_MICK,
     log,
 )
 from tiktok_client import TikTokClient
@@ -98,6 +96,10 @@ import ai_chat
 import level_card
 import welcome_card
 import versioning
+import pets
+import pvp
+import season
+import business_v2
 
 # ---------------------------------------------------------------------------
 # Discord Bot
@@ -204,7 +206,6 @@ async def on_ready():
             voice_xp_loop.start()
         if not learn_word_flush_loop.is_running():
             learn_word_flush_loop.start()
-            guess_meaning_loop.start()
         if not anniversary_loop.is_running():
             anniversary_loop.start()
     except Exception as e:
@@ -428,7 +429,9 @@ async def before_daily_loop():
 @tasks.loop(seconds=BUSINESS_TICK_SEC)
 async def business_tick_loop():
     try:
-        await features.run_income_tick()
+        # v2: áp dụng cả level nâng cấp (business_v2.upgrade_business) lẫn hệ
+        # số thị trường biến động (xem business_v2.py) vào công thức thu nhập.
+        await business_v2.run_income_tick_v2()
     except Exception as e:
         log.warning("Business tick lỗi: %s", e)
 
@@ -605,27 +608,6 @@ async def anniversary_loop():
 
 @anniversary_loop.before_loop
 async def before_anniversary_loop():
-    await client.wait_until_ready()
-
-
-# Định kỳ nhờ AI đoán nghĩa hàng loạt cho top từ đã "học" (đếm tần suất)
-# nhưng chưa có nghĩa -> có nghĩa thì mới được _build_slang_context() dùng
-# trong AI chat. Chỉ 1 lượt Groq call cho cả batch, không đoán từng từ riêng.
-@tasks.loop(seconds=AI_GUESS_MEANING_INTERVAL_SEC)
-async def guess_meaning_loop():
-    try:
-        n = await ai_chat.guess_meanings_for_top_words(
-            batch_size=AI_GUESS_MEANING_BATCH_SIZE,
-            min_count=AI_GUESS_MEANING_MIN_COUNT,
-        )
-        if n:
-            log.info("AI đã tự đoán nghĩa cho %d từ mới.", n)
-    except Exception as e:
-        log.warning("Đoán nghĩa từ định kỳ lỗi: %s", e)
-
-
-@guess_meaning_loop.before_loop
-async def before_guess_meaning_loop():
     await client.wait_until_ready()
 
 
@@ -1259,6 +1241,17 @@ async def _bump_quest_and_notify_ctx(channel, user, quest_id: str):
 
 
 async def _handle_ai_reply(message: discord.Message):
+    # Ưu tiên check ý định "nhờ AI tặng MICK" trước - nếu đúng thì xử lý +
+    # trả lời xác nhận/từ chối luôn, không chạy tiếp reply_to_message() bình
+    # thường (tránh AI vừa tặng vừa trả lời lạc đề cùng lúc).
+    try:
+        handled = await _maybe_handle_ai_gift(message)
+    except Exception as e:
+        log.warning("Xử lý tặng MICK qua AI lỗi: %s", e)
+        handled = False
+    if handled:
+        return
+
     try:
         reply_text = await ai_chat.reply_to_message(message)
     except Exception as e:
@@ -1270,6 +1263,80 @@ async def _handle_ai_reply(message: discord.Message):
         await message.reply(reply_text, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
     except Exception as e:
         log.warning("Gửi AI reply lỗi: %s", e)
+
+
+async def _maybe_handle_ai_gift(message: discord.Message) -> bool:
+    """Nếu tin nhắn có vẻ đang nhờ bot tặng MICK cho ai đó (xem
+    ai_chat.detect_gift_intent), validate + thực thi luôn qua
+    economy.transfer_mick (đúng logic phí/lock như /transfer-money thường).
+
+    Trả True nếu ĐÃ xử lý (dù thành công hay từ chối) - lúc đó
+    _handle_ai_reply sẽ KHÔNG gọi tiếp reply_to_message() cho tin nhắn này.
+    Trả False nếu tin nhắn không phải ý định tặng MICK - AI chat tiếp tục xử
+    lý bình thường.
+
+    An toàn: AI chỉ cung cấp "amount" và "target_hint" (gợi ý tên) - người
+    NHẬN THẬT SỰ được xác định bằng discord.Message.mentions (mention thật
+    trong tin nhắn Discord, không phải tên do AI tự đoán/suy diễn), nên
+    không thể bị dụ prompt-injection để tặng nhầm người.
+    """
+    intent = await ai_chat.detect_gift_intent(message.content)
+    if not intent:
+        return False
+
+    real_mentions = [m for m in message.mentions if not m.bot and m.id != message.author.id]
+    if not real_mentions:
+        await message.reply(
+            "🤔 Bạn muốn tặng MICK cho ai vậy? Tag (@) thẳng người đó vào tin nhắn nha!",
+            mention_author=False, allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return True
+    if len(real_mentions) > 1:
+        await message.reply(
+            "🤔 Mỗi lần chỉ tặng được cho 1 người thôi, tag đúng 1 người nha!",
+            mention_author=False, allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return True
+
+    target = real_mentions[0]
+    amount = intent["amount"]
+    remaining = ai_chat._gift_remaining_today(message.author.id)
+
+    if remaining <= 0:
+        await message.reply(
+            f"❌ Bạn đã tặng đủ **{AI_GIFT_DAILY_LIMIT_MICK} MICK** qua mình hôm nay rồi, "
+            "mai quay lại nha! (Vẫn dùng `/transfer-money` bình thường được nếu muốn chuyển thêm.)",
+            mention_author=False, allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return True
+    if amount > remaining:
+        await message.reply(
+            f"❌ Bạn chỉ còn được tặng tối đa **{remaining} MICK** qua mình hôm nay thôi "
+            f"(giới hạn {AI_GIFT_DAILY_LIMIT_MICK} MICK/ngày). Thử số nhỏ hơn nha!",
+            mention_author=False, allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return True
+
+    result = await economy.transfer_mick(message.author.id, target.id, amount)
+    if not result["ok"]:
+        reason_map = {
+            "insufficient_funds": "❌ Bạn không đủ MICK để tặng số này đâu!",
+            "invalid_amount": "❌ Số MICK không hợp lệ.",
+            "self_transfer": "❌ Không thể tự tặng cho chính mình.",
+        }
+        await message.reply(
+            reason_map.get(result["reason"], "❌ Có lỗi xảy ra, thử lại sau nha."),
+            mention_author=False, allowed_mentions=discord.AllowedMentions.none(),
+        )
+        return True
+
+    ai_chat._record_gift_sent(message.author.id, amount)
+    await message.reply(
+        f"✅ Đã tặng **{amount} MICK** cho {target.mention} giúp bạn! "
+        f"(nhận được **{result['received']} MICK** sau phí) 🎁",
+        mention_author=False, allowed_mentions=discord.AllowedMentions.none(),
+    )
+    return True
 
 
 def _mark_active_today(user_id: int):
@@ -2961,17 +3028,40 @@ async def giao_dich_cmd(interaction: discord.Interaction):
 
 class BusinessKindSelect(discord.ui.Select):
     def __init__(self, action: str, owner_id: int):
-        self.action = action  # "open" hoặc "hire"
+        self.action = action  # "open", "hire" hoặc "upgrade"
         self.owner_id = owner_id
         options = [
             discord.SelectOption(label=name, value=kind) for kind, name in features.BUSINESS_NAMES.items()
         ]
-        placeholder = "Chọn loại hình muốn mở..." if action == "open" else "Chọn loại hình muốn thuê nhân viên..."
-        super().__init__(placeholder=placeholder, options=options, min_values=1, max_values=1)
+        placeholder_map = {
+            "open": "Chọn loại hình muốn mở...",
+            "hire": "Chọn loại hình muốn thuê nhân viên...",
+            "upgrade": "Chọn loại hình muốn nâng cấp...",
+        }
+        super().__init__(placeholder=placeholder_map.get(action, "Chọn loại hình..."), options=options, min_values=1, max_values=1)
 
     async def callback(self, interaction: discord.Interaction):
         kind = self.values[0]
         label = features.BUSINESS_NAMES[kind]
+
+        if self.action == "upgrade":
+            result = await business_v2.upgrade_business(self.owner_id, kind)
+            if result["ok"]:
+                bonus_pct = business_v2.UPGRADE_INCOME_BONUS_PER_LEVEL * 100
+                text = (
+                    f"⬆️ Đã nâng cấp **{label}** lên **level {result['level']}**! "
+                    f"Tốn **{result['cost']} MICK** (+{bonus_pct:.0f}% thu nhập/level)."
+                )
+            else:
+                reason = result["reason"]
+                messages_map = {
+                    "not_opened": f"❌ Bạn chưa mở **{label}**! Bấm nút \"Mở cơ sở mới\" ở `/kinh-doanh` trước.",
+                    "max_level": f"❌ **{label}** đã đạt cấp tối đa ({business_v2.UPGRADE_MAX_LEVEL}) rồi!",
+                    "insufficient_funds": f"❌ Không đủ MICK! Cần **{result.get('cost')} MICK** để nâng cấp.",
+                }
+                text = messages_map.get(reason, "❌ Có lỗi xảy ra.")
+            await interaction.response.edit_message(content=text, view=None)
+            return
 
         if self.action == "open":
             result = await features.open_business(self.owner_id, kind)
@@ -3043,6 +3133,10 @@ class BusinessView(discord.ui.LayoutView):
         btn_hire.callback = self._btn_hire
         row.add_item(btn_hire)
 
+        btn_upgrade = discord.ui.Button(label="Nâng cấp", emoji="⬆️", style=discord.ButtonStyle.success)
+        btn_upgrade.callback = self._btn_upgrade
+        row.add_item(btn_upgrade)
+
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
             await interaction.response.send_message("Dùng `/kinh-doanh` để xem cơ ngơi của riêng bạn!", ephemeral=True)
@@ -3070,12 +3164,237 @@ class BusinessView(discord.ui.LayoutView):
             "Chọn loại hình muốn thuê thêm nhân viên:", view=BusinessActionView("hire", self.owner_id), ephemeral=True
         )
 
+    async def _btn_upgrade(self, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            "Chọn loại hình muốn nâng cấp (tăng % thu nhập cố định):",
+            view=BusinessActionView("upgrade", self.owner_id), ephemeral=True,
+        )
+
+
+@tree.command(name="market", description="Xem hệ số thị trường hiện tại của các loại hình kinh doanh")
+async def market_cmd(interaction: discord.Interaction):
+    await interaction.response.defer()
+    multipliers = await business_v2.get_all_market_multipliers()
+    container = business_v2.build_market_container(interaction.user.display_name, multipliers)
+    await interaction.followup.send(view=features.SimpleContainerLayout(container))
+
 
 @tree.command(name="business", description="Xem, mở cơ sở mới, hoặc thuê nhân viên cho cơ ngơi kinh doanh")
 async def business_cmd(interaction: discord.Interaction):
     summary = await features.get_summary(interaction.user.id)
     container = features.build_summary_container(interaction.user.display_name, summary)
     await interaction.response.send_message(view=BusinessView(interaction.user.id, container))
+
+
+# ---------------------------------------------------------------------------
+# Slash command: /pet - nuôi, cho ăn, chơi, train thú cưng
+# ---------------------------------------------------------------------------
+
+
+class AdoptSpeciesModal(discord.ui.Modal, title="Đặt tên cho pet"):
+    ten = discord.ui.TextInput(label="Tên pet", max_length=24, placeholder="vd: Mít")
+
+    def __init__(self, user_id: int, species: str):
+        super().__init__()
+        self.user_id = user_id
+        self.species = species
+
+    async def on_submit(self, interaction: discord.Interaction):
+        result = await pets.adopt_pet(self.user_id, self.species, str(self.ten))
+        if not result["ok"]:
+            reason_map = {
+                "already_has_pet": "❌ Bạn đã có 1 pet rồi.",
+                "insufficient_funds": f"❌ Bạn không đủ {pets.ADOPT_COST} MICK để nhận nuôi.",
+                "invalid_species": "❌ Loài không hợp lệ.",
+            }
+            await interaction.response.send_message(reason_map.get(result["reason"], "❌ Có lỗi xảy ra."), ephemeral=True)
+            return
+        container = pets.build_pet_container(interaction.user.display_name, result["pet"])
+        await interaction.response.send_message(
+            content="🎉 Chúc mừng bạn đã nhận nuôi 1 thú cưng mới!",
+            view=PetActionView(self.user_id, container),
+        )
+
+
+class AdoptPetView(discord.ui.LayoutView):
+    def __init__(self, user_id: int, container: discord.ui.Container):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        self.add_item(container)
+        row = discord.ui.ActionRow()
+        self.add_item(row)
+        for key, info in pets.SPECIES.items():
+            btn = discord.ui.Button(label=info["name"], emoji=info["emoji"], style=discord.ButtonStyle.primary)
+            btn.callback = self._make_cb(key)
+            row.add_item(btn)
+
+    def _make_cb(self, species: str):
+        async def _cb(interaction: discord.Interaction):
+            if interaction.user.id != self.user_id:
+                await interaction.response.send_message("❌ Không phải pet của bạn.", ephemeral=True)
+                return
+            await interaction.response.send_modal(AdoptSpeciesModal(self.user_id, species))
+        return _cb
+
+
+class PetActionView(discord.ui.LayoutView):
+    def __init__(self, user_id: int, container: discord.ui.Container):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        self.add_item(container)
+        row = discord.ui.ActionRow()
+        self.add_item(row)
+
+        feed_btn = discord.ui.Button(label="Cho ăn", emoji="🍖", style=discord.ButtonStyle.success)
+        feed_btn.callback = self._feed
+        row.add_item(feed_btn)
+
+        play_btn = discord.ui.Button(label="Chơi cùng", emoji="🎾", style=discord.ButtonStyle.primary)
+        play_btn.callback = self._play
+        row.add_item(play_btn)
+
+        train_btn = discord.ui.Button(label="Train", emoji="🏋️", style=discord.ButtonStyle.secondary)
+        train_btn.callback = self._train
+        row.add_item(train_btn)
+
+    async def _guard(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Không phải pet của bạn.", ephemeral=True)
+            return False
+        return True
+
+    async def _feed(self, interaction: discord.Interaction):
+        if not await self._guard(interaction):
+            return
+        result = await pets.feed_pet(self.user_id)
+        if not result["ok"]:
+            reason_map = {
+                "ran_away": "😭 Pet của bạn đã bỏ trốn vì bị bỏ đói quá lâu...",
+                "no_pet": "❌ Bạn chưa có pet.",
+                "insufficient_funds": f"❌ Cần {pets.FEED_COST} MICK để cho ăn.",
+            }
+            await interaction.response.send_message(reason_map.get(result["reason"], "❌ Lỗi."), ephemeral=True)
+            return
+        container = pets.build_pet_container(interaction.user.display_name, result["pet"])
+        await interaction.response.edit_message(view=PetActionView(self.user_id, container))
+
+    async def _play(self, interaction: discord.Interaction):
+        if not await self._guard(interaction):
+            return
+        result = await pets.play_with_pet(self.user_id)
+        if not result["ok"]:
+            if result["reason"] == "cooldown":
+                mins = result["remaining"] // 60
+                await interaction.response.send_message(f"⏳ Pet cần nghỉ, thử lại sau {mins} phút nữa.", ephemeral=True)
+            elif result["reason"] == "ran_away":
+                await interaction.response.send_message("😭 Pet của bạn đã bỏ trốn vì bị bỏ đói quá lâu...", ephemeral=True)
+            else:
+                await interaction.response.send_message("❌ Bạn chưa có pet.", ephemeral=True)
+            return
+        container = pets.build_pet_container(interaction.user.display_name, result["pet"])
+        await interaction.response.edit_message(view=PetActionView(self.user_id, container))
+
+    async def _train(self, interaction: discord.Interaction):
+        if not await self._guard(interaction):
+            return
+        result = await pets.train_pet(self.user_id)
+        if not result["ok"]:
+            reason_map = {
+                "ran_away": "😭 Pet của bạn đã bỏ trốn vì bị bỏ đói quá lâu...",
+                "no_pet": "❌ Bạn chưa có pet.",
+                "too_hungry": "❌ Pet quá đói để train, cho ăn trước đã!",
+                "insufficient_funds": f"❌ Cần {pets.TRAIN_MICK_COST} MICK để train.",
+            }
+            if result["reason"] == "cooldown":
+                mins = result["remaining"] // 60
+                await interaction.response.send_message(f"⏳ Pet cần nghỉ, thử lại sau {mins} phút nữa.", ephemeral=True)
+                return
+            await interaction.response.send_message(reason_map.get(result["reason"], "❌ Lỗi."), ephemeral=True)
+            return
+        container = pets.build_pet_container(interaction.user.display_name, result["pet"])
+        extra = f"\n\n✨ +{result['gained_xp']} XP" + (" · 🎉 LÊN CẤP!" if result["leveled_up"] else "")
+        await interaction.response.edit_message(view=PetActionView(self.user_id, container))
+        await interaction.followup.send(extra, ephemeral=True)
+
+
+@tree.command(name="pet", description="Xem, nhận nuôi, cho ăn hoặc train thú cưng của bạn")
+async def pet_cmd(interaction: discord.Interaction):
+    await pets.check_starvation(interaction.user.id)
+    pet = await pets.get_pet_live(interaction.user.id)
+    if not pet:
+        container = features.build_container(
+            title="🐾 Bạn chưa có thú cưng nào",
+            description=(
+                f"Nhận nuôi 1 pet với giá **{pets.ADOPT_COST} MICK**!\n\n"
+                + "\n".join(f"{v['emoji']} **{v['name']}** — {v['flavor']}" for v in pets.SPECIES.values())
+            ),
+            color=discord.Color.blue(),
+        )
+        await interaction.response.send_message(view=AdoptPetView(interaction.user.id, container))
+        return
+    container = pets.build_pet_container(interaction.user.display_name, pet)
+    await interaction.response.send_message(view=PetActionView(interaction.user.id, container))
+
+
+# ---------------------------------------------------------------------------
+# Slash command: /pvp - thách đấu 1v1 cược MICK
+# ---------------------------------------------------------------------------
+
+
+@tree.command(name="pvp", description="Thách đấu 1v1 cược MICK với người khác (Oẳn tù tì / Tài xỉu đối đầu)")
+@discord.app_commands.describe(doi_thu="Người bạn muốn thách đấu", che_do="Chế độ đấu", cuoc="Số MICK cược mỗi bên")
+@discord.app_commands.choices(che_do=[
+    discord.app_commands.Choice(name="Oẳn Tù Tì", value="rps"),
+    discord.app_commands.Choice(name="Tài Xỉu Đối Đầu", value="taixiu"),
+])
+async def pvp_cmd(interaction: discord.Interaction, doi_thu: discord.Member, che_do: discord.app_commands.Choice[str], cuoc: int):
+    if doi_thu.bot:
+        await interaction.response.send_message("❌ Không thể thách đấu bot.", ephemeral=True)
+        return
+    result = await pvp.create_challenge(interaction.user.id, doi_thu.id, che_do.value, cuoc)
+    if not result["ok"]:
+        reason_map = {
+            "self_challenge": "❌ Không thể tự thách đấu chính mình.",
+            "invalid_amount": "❌ Số MICK cược không hợp lệ.",
+            "insufficient_funds": "❌ Bạn không đủ MICK để cược mức này.",
+        }
+        await interaction.response.send_message(reason_map.get(result["reason"], "❌ Lỗi."), ephemeral=True)
+        return
+    view = pvp.ChallengeInviteView(
+        result["challenge_id"], interaction.user.id, doi_thu.id,
+        interaction.user.display_name, doi_thu.display_name, che_do.value, cuoc,
+    )
+    await interaction.response.send_message(content=doi_thu.mention, view=view)
+
+
+# ---------------------------------------------------------------------------
+# Slash command: /season - bảng xếp hạng mùa giải hiện tại
+# ---------------------------------------------------------------------------
+
+
+@tree.command(name="season", description="Xem bảng xếp hạng mùa giải hiện tại (reset mỗi tháng, có thưởng top 3)")
+async def season_cmd(interaction: discord.Interaction):
+    await interaction.response.defer()
+    rollover = await season.maybe_rollover_season()
+    if rollover and rollover["rewards"]:
+        lines = []
+        for r in rollover["rewards"]:
+            member = interaction.guild.get_member(r["user_id"]) if interaction.guild else None
+            name = member.display_name if member else f"User {r['user_id']}"
+            lines.append(f"🏆 Hạng {r['rank']}: **{name}** nhận **{r['reward']} MICK**")
+        await interaction.followup.send(
+            f"📅 Mùa **{rollover['old_season_id']}** đã kết thúc! Trao thưởng:\n" + "\n".join(lines)
+        )
+
+    state = await season.get_season_state()
+    entries = await season.get_season_leaderboard(state["season_id"])
+
+    def _name_lookup(uid: int) -> str:
+        member = interaction.guild.get_member(uid) if interaction.guild else None
+        return member.display_name if member else f"User {uid}"
+
+    container = season.build_leaderboard_container(state["season_id"], entries, _name_lookup)
+    await interaction.followup.send(view=features.SimpleContainerLayout(container))
 
 
 # ---------------------------------------------------------------------------
@@ -3116,8 +3435,10 @@ class LookupWordModal(discord.ui.Modal, title="Tra từ"):
         data = await db.get_word(word)
         if data.get("meaning"):
             source_label = "member dạy" if data.get("source") == "taught" else "bot tự học"
+            count = data.get("count", 0)
             await interaction.response.send_message(
-                f"📖 **{word.strip().lower()}**: {data['meaning']}\n-# ({source_label})"
+                f"📖 **{word.strip().lower()}**: {data['meaning']}\n"
+                f"-# ({source_label} · gặp {count} lần)"
             )
         else:
             await interaction.response.send_message(
@@ -3160,22 +3481,63 @@ async def tudien_cmd(interaction: discord.Interaction):
     await interaction.response.send_message(view=DictionaryView(), ephemeral=True)
 
 
-@tree.command(name="ask-ai", description="Chat trực tiếp với AI của bot (Groq)")
-@discord.app_commands.describe(noi_dung="Bạn muốn nói gì với bot?")
+@tree.command(name="ask-ai", description="Chat trực tiếp với AI của bot (Groq), nhớ vài lượt gần nhất")
+@discord.app_commands.describe(noi_dung="Bạn muốn nói gì với bot? (dán link để nhờ AI đọc/tóm tắt trang đó)")
 async def ai_cmd(interaction: discord.Interaction, noi_dung: str):
     await interaction.response.defer()
+    user_id = interaction.user.id
+    history = ai_chat._get_history(user_id)
+    slang_context = await ai_chat._build_slang_context()
+    system_prompt = (
+        ai_chat.SYSTEM_PROMPT + slang_context
+        + ai_chat._build_rules_context(noi_dung) + ai_chat._build_help_context(noi_dung)
+    )
     messages = [
-        {"role": "system", "content": ai_chat.SYSTEM_PROMPT},
+        {"role": "system", "content": system_prompt},
+        *history,
         {"role": "user", "content": noi_dung},
     ]
 
+    url = ai_chat._extract_first_url(noi_dung)
+    if url:
+        status_msg = await interaction.followup.send("-# 🔗 đang đọc trang web...", wait=True)
+        title, text, reason = await ai_chat._fetch_url_text(url)
+        if not text:
+            final_text = (
+                "-# ⚠️ không đọc được trang này\n"
+                f"Sorry, mình không đọc được nội dung trang bạn gửi 🙏\n-# lý do: {reason}"
+            )
+        else:
+            question = (noi_dung.replace(url, "").strip()) or "Tóm tắt nội dung chính của trang này."
+            groq_prompt = (
+                f"{system_prompt}\n\n"
+                "Người dùng vừa gửi 1 link web, dưới đây là nội dung THẬT đã trích xuất từ "
+                "trang đó (tiêu đề + văn bản, có thể bị cắt bớt nếu trang dài). Dựa ĐÚNG vào "
+                "nội dung này để trả lời/tóm tắt, không bịa thêm thông tin không có trong "
+                "trang, không nói 'theo nội dung trích xuất' - trả lời tự nhiên như đã tự đọc "
+                f"trang đó:\n\nTiêu đề: {title or '(không có)'}\n\nNội dung:\n{text}"
+            )
+            result = await ai_chat._groq_chat(
+                [{"role": "system", "content": groq_prompt}, {"role": "user", "content": question}], max_tokens=600
+            )
+            if result:
+                final_text = ai_chat._sanitize_ai_output(result)
+                if len(final_text) > 2000:
+                    final_text = final_text[:1990] + "…"
+                ai_chat._remember_turn(user_id, noi_dung, final_text)
+            else:
+                final_text = "😵 Đọc được trang rồi nhưng AI tóm tắt lỗi (thiếu GROQ_API_KEY hoặc lỗi kết nối)."
+        await status_msg.edit(content=final_text)
+        return
+
     if ai_chat.needs_web_search(noi_dung):
         status_msg = await interaction.followup.send("-# 🔎 đang tìm kiếm trên mạng...", wait=True)
-        result, ok, reason = await ai_chat._tavily_search_answer(ai_chat.SYSTEM_PROMPT, noi_dung)
+        result, ok, reason = await ai_chat._tavily_search_answer(system_prompt, noi_dung)
         if ok and result:
             final_text = ai_chat._sanitize_ai_output(result)
             if len(final_text) > 2000:
                 final_text = final_text[:1990] + "…"
+            ai_chat._remember_turn(user_id, noi_dung, final_text)
         else:
             final_text = (
                 "-# ⚠️ tìm kiếm lỗi\n"
@@ -3187,11 +3549,54 @@ async def ai_cmd(interaction: discord.Interaction, noi_dung: str):
 
     reply_text = await ai_chat._groq_chat(messages)
     if reply_text:
-        await interaction.followup.send(
-            ai_chat._sanitize_ai_output(reply_text), allowed_mentions=discord.AllowedMentions.none()
-        )
+        final_text = ai_chat._sanitize_ai_output(reply_text)
+        ai_chat._remember_turn(user_id, noi_dung, final_text)
+        await interaction.followup.send(final_text, allowed_mentions=discord.AllowedMentions.none())
     else:
         await interaction.followup.send("😵 AI hiện chưa sẵn sàng (thiếu GROQ_API_KEY hoặc lỗi kết nối).")
+
+
+@tree.command(name="tom-tat", description="Nhờ AI tóm tắt các tin nhắn gần đây trong kênh này")
+@discord.app_commands.describe(so_luong="Số tin nhắn gần nhất cần tóm tắt (mặc định 50, tối đa 200)")
+async def summarize_channel_cmd(interaction: discord.Interaction, so_luong: int = 50):
+    so_luong = max(5, min(so_luong, 200))
+    await interaction.response.defer()
+
+    lines = []
+    async for msg in interaction.channel.history(limit=so_luong):
+        if not msg.content or msg.author.bot:
+            continue
+        lines.append(f"{msg.author.display_name}: {msg.content}")
+    lines.reverse()  # đưa về đúng thứ tự thời gian (cũ -> mới)
+
+    if not lines:
+        await interaction.followup.send("❌ Không có đủ tin nhắn văn bản gần đây để tóm tắt.")
+        return
+
+    transcript = "\n".join(lines)[-12000:]  # cắt bớt nếu quá dài, ưu tiên giữ phần MỚI NHẤT
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Bạn là trợ lý tóm tắt đoạn chat Discord tiếng Việt. Đọc đoạn hội thoại được đưa, "
+                "tóm tắt ngắn gọn các chủ đề/sự kiện chính đã được nói tới, dạng gạch đầu dòng "
+                "(tối đa 6 gạch đầu dòng, mỗi gạch 1 câu ngắn). Không bịa thêm nội dung không có "
+                "trong đoạn chat, không nhắc tên cụ thể trừ khi cần thiết để rõ ngữ cảnh."
+            ),
+        },
+        {"role": "user", "content": f"Đoạn chat cần tóm tắt:\n\n{transcript}"},
+    ]
+    result = await ai_chat._groq_chat(messages, max_tokens=600)
+    if not result:
+        await interaction.followup.send("😵 AI hiện chưa sẵn sàng (thiếu GROQ_API_KEY hoặc lỗi kết nối).")
+        return
+    summary = ai_chat._sanitize_ai_output(result)
+    container = features.build_container(
+        title=f"📝 Tóm tắt {len(lines)} tin nhắn gần đây",
+        description=summary,
+        color=discord.Color.blurple(),
+    )
+    await interaction.followup.send(view=features.SimpleContainerLayout(container))
 
 
 # ---------------------------------------------------------------------------
@@ -3404,7 +3809,18 @@ _HELP_CATEGORIES = [
         "label": "Kinh doanh",
         "emoji": "💼",
         "commands": [
-            ("/business", "Xem cơ ngơi · Mở cơ sở mới · Thuê nhân viên — bấm nút"),
+            ("/business", "Xem cơ ngơi · Mở cơ sở mới · Thuê nhân viên · Nâng cấp — bấm nút"),
+            ("/market", "Xem hệ số thị trường hiện tại của các loại hình kinh doanh"),
+        ],
+    },
+    {
+        "key": "pet_pvp",
+        "label": "Thú cưng & PvP",
+        "emoji": "🐾",
+        "commands": [
+            ("/pet", "Nhận nuôi, cho ăn, chơi cùng, hoặc train thú cưng của bạn"),
+            ("/pvp [doi_thu] [che_do] [cuoc]", "Thách đấu 1v1 cược MICK (Oẳn Tù Tì / Tài Xỉu Đối Đầu)"),
+            ("/season", "Bảng xếp hạng mùa giải hiện tại, reset mỗi tháng, thưởng top 3"),
         ],
     },
     {
@@ -3412,7 +3828,8 @@ _HELP_CATEGORIES = [
         "label": "AI & Từ điển",
         "emoji": "🤖",
         "commands": [
-            ("/ask-ai [noi_dung]", "Chat trực tiếp với AI của bot"),
+            ("/ask-ai [noi_dung]", "Chat trực tiếp với AI của bot (nhớ vài lượt hội thoại gần nhất)"),
+            ("/tom-tat [so_luong]", "Nhờ AI tóm tắt các tin nhắn gần đây trong kênh"),
             ("/dictionary", "Tra từ hoặc dạy bot nghĩa từ mới — bấm nút, nhập qua form"),
         ],
     },
@@ -3442,6 +3859,17 @@ _HELP_CATEGORIES = [
         ],
     },
 ]
+
+# Bơm danh sách lệnh thật (nguồn dữ liệu DUY NHẤT ở trên) sang ai_chat.py để
+# AI trả lời đúng tên lệnh/cú pháp khi có người hỏi "bot có lệnh gì" - xem
+# ai_chat.set_command_list()/_build_help_context(). Chạy 1 lần lúc import
+# module này, không cần gọi lại.
+ai_chat.set_command_list(
+    "\n".join(
+        f"[{cat['label']}]\n" + "\n".join(f"- {name}: {desc}" for name, desc in cat["commands"])
+        for cat in _HELP_CATEGORIES
+    )
+)
 
 
 def _fill_help_container(container: discord.ui.Container, cat: dict | None) -> None:

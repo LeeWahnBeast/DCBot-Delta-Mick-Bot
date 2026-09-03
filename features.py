@@ -917,7 +917,7 @@ async def stop_game(game_id: str, user_id: int) -> tuple[bool, int | None]:
 
     refunded = None
     if game["type"] in ("taixiu", "xidach", "coinflip") and game.get("bet"):
-        refunded = await economy.add_mick(user_id, game["bet"])
+        refunded = await economy.add_mick(user_id, game["bet"], count_for_season=False)
 
     _active_games.pop(game_id, None)
     return True, refunded
@@ -1647,7 +1647,7 @@ async def xidach_stand(game_id: str) -> discord.ui.Container | None:
         )
         color, status = discord.Color.green(), "won"
     elif player_val == bot_val:
-        new_balance = await economy.add_mick(user_id, bet)  # hòa: trả lại tiền cược
+        new_balance = await economy.add_mick(user_id, bet, count_for_season=False)  # hòa: trả lại tiền cược
         desc = (
             f"Bài của bạn: {_hand_text(player)}\nBài bot: {_hand_text(bot_hand)}\n\n"
             f"🤝 Hòa! Bạn được trả lại **{bet} MICK** đã cược (số dư: {new_balance})"

@@ -21,6 +21,7 @@ import json
 import random
 import re
 import time
+from html.parser import HTMLParser
 
 import aiohttp
 import discord
@@ -32,6 +33,9 @@ from config import (
     TAVILY_API_KEY,
     AI_LEARN_MIN_WORD_LEN,
     AI_LEARN_MIN_MEMBERS,
+    AI_GIFT_DAILY_LIMIT_MICK,
+    VN_UTC_OFFSET_HOURS,
+    CURRENCY_EMOJI,
     log,
 )
 
@@ -55,6 +59,136 @@ SYSTEM_PROMPT = (
     "nhàng, hài hước, đúng chất gen Z, rồi lái sang chuyện khác.\n"
     "- Luôn giữ không khí văn minh, thân thiện, tích cực cho cả server."
 )
+
+# ---------------------------------------------------------------------------
+# Luật server: nhúng NGUYÊN VĂN vào system prompt khi có ai hỏi về luật/hình
+# phạt, để AI trả lời ĐÚNG nội dung thật thay vì bịa ra luật không tồn tại.
+# Không nhúng vào MỌI câu hỏi (tốn token vô ích) - chỉ khi trúng
+# _RULES_TRIGGER_RE bên dưới.
+# ---------------------------------------------------------------------------
+
+SERVER_RULES = """LUẬT Lãnh Địa Delta Mick
+
+Chào mừng bradar đến với VÙNG ĐẤT của anh em bradar. Đọc nhanh vài điều dưới đây để giữ server vui vẻ và văn minh nhé.
+
+❶ Tôn trọng nhau
+- Không kỳ thị, xúc phạm, phân biệt vùng miền, chủng tộc hay phân biệt đối xử.
+- Hạn chế chửi bậy, nói lời gây tổn thương.
+- Cư xử văn minh để anh em cùng vui.
+
+❷ Đùa đúng lúc, đúng chỗ
+- Đùa vui thì được, nhưng đừng quá trớn.
+- Không joke về tôn giáo, vùng miền, chủng tộc, nội dung 18+, PDF, xu hướng tính dục, khuyết tật hoặc sang chấn cá nhân.
+- Nếu bradar kia bảo dừng thì dừng ngay.
+
+❸ Cấm spam & nội dung không phù hợp
+- Không spam tin nhắn, hình ảnh hoặc link.
+- Cấm nội dung phản động, chống phá Nhà nước, 18+, gore, bạo lực hoặc vi phạm cộng đồng.
+
+❹ Không quảng bá server khác
+- Không gửi invite hoặc quảng cáo server khác.
+- Cấm lừa đảo, phát tán virus, phần mềm độc hại hoặc bất kỳ nội dung nào gây nguy hiểm cho server.
+
+❺ Tôn trọng quản trị viên
+- Có gì chưa đồng ý thì nhắn riêng để trao đổi.
+- Đừng cãi nhau công khai hay gây mất trật tự.
+
+❻ Không kích động gây war
+- Đừng gây drama, gây war hay kích động cãi nhau.
+- Giữ bầu không khí vui vẻ cho mọi bradar.
+
+❼ LUẬT TÙ BỔ SUNG
+- Người nhận tù thay được áp dụng thời gian tù như bình thường.
+- Tù 30-60 lần có thể được xem xét thả tùy tình hình.
+- Tù dưới 100 lần không tự động được thả.
+- Không được yêu cầu người khác nhận tù thay để né án nếu chưa được Admin cho phép.
+- Người nhận tù thay không được tự ý bỏ tù giữa chừng.
+- Admin có quyền quyết định giảm hoặc giữ nguyên số lần tù tùy trường hợp.
+- Mọi thành viên đều được áp dụng cùng một quy định, không phân biệt người nhận tù thay là ai.
+
+BONUS LUẬT
+- Tự ý chỉnh sửa quyền server hoặc tên server: Admin vi phạm sẽ bị mute 10 phút và tước quyền Admin.
+- Tự ý tag everyone hoặc here: Thành viên vi phạm sẽ bị timeout 1 giờ.
+- Lạm dụng quyền Admin/Staff: Tùy mức độ có thể bị tước quyền. (Cực nặng)
+- Spam bot: Không spam lệnh bot trong kênh chat chung.
+- Khai gian khi ứng tuyển: Phát hiện gian dối sẽ loại ứng viên hoặc tước quyền. (Cực nặng)
+- Tự ý thay đổi role/kênh/server: Không được thực hiện nếu chưa có sự cho phép.
+- Xử lý thành viên không công bằng: Không được bao che hoặc ưu tiên người quen.
+
+🚨 HÌNH PHẠT
+🟢 Nhẹ: Cảnh cáo hoặc vào Trại Cải Tạo.
+🟡 Vừa: Cách ly 15 phút - 3 giờ hoặc vào Trại Cải Tạo (lau dọn cực hơn).
+🟠 Hơi nặng: Cách ly 24 giờ hoặc vào Trại Cải Tạo (dọn cực tới gãy xương sống) hoặc Kick.
+🔴 Nghiêm trọng: Đá đít ngay bãi rác của server vĩnh viễn.
+
+Cảm ơn bradar đã dành thời gian đọc luật. Chơi vui, đừng vi phạm là được."""
+
+_RULES_TRIGGER_RE = re.compile(
+    r"(luật|nội quy|rule|hình phạt|bị phạt|vi phạm|bị mute|bị timeout|"
+    r"bị cách ly|bị ban|bị kick|trại cải tạo|đi tù|nhận tù|luật tù)",
+    re.IGNORECASE,
+)
+
+
+def needs_rules_context(text: str) -> bool:
+    """True nếu câu hỏi có vẻ đang hỏi về luật/hình phạt server -> nên nhúng
+    nguyên văn SERVER_RULES vào system prompt để AI trả lời đúng, không bịa."""
+    return bool(_RULES_TRIGGER_RE.search(text or ""))
+
+
+def _build_rules_context(text: str) -> str:
+    if not needs_rules_context(text):
+        return ""
+    return (
+        "\n\nDưới đây là NGUYÊN VĂN luật thật của server - người dùng có vẻ đang hỏi "
+        "về luật/hình phạt, hãy trả lời DỰA ĐÚNG vào nội dung này, không bịa thêm "
+        "luật không có, có thể diễn giải lại ngắn gọn dễ hiểu nhưng không đổi ý nghĩa:\n\n"
+        f"{SERVER_RULES}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Danh sách lệnh: discord_bot.py gọi set_command_list() 1 lần lúc khởi động
+# (ngay sau khi định nghĩa _HELP_CATEGORIES, nguồn dữ liệu DUY NHẤT cho cả
+# lệnh /help lẫn AI) để bơm text vào đây - tránh ai_chat.py phải import
+# ngược discord_bot.py (sẽ tạo vòng lặp import vì discord_bot.py đã import
+# ai_chat). Nhờ vậy khi thêm/sửa lệnh trong _HELP_CATEGORIES, AI tự động biết
+# theo, không cần sửa 2 chỗ.
+# ---------------------------------------------------------------------------
+
+_command_list_text: str = ""
+
+_HELP_TRIGGER_RE = re.compile(
+    r"(có (?:những )?lệnh|lệnh gì|lệnh nào|danh sách lệnh|list lệnh|cách dùng|"
+    r"cú pháp|dùng sao|xài sao|làm sao để|có tính năng|tính năng gì|làm được gì|"
+    r"biết làm gì|bot làm gì|help\b|hướng dẫn)",
+    re.IGNORECASE,
+)
+
+
+def set_command_list(text: str) -> None:
+    global _command_list_text
+    _command_list_text = text
+
+
+def needs_help_context(text: str) -> bool:
+    """True nếu câu hỏi có vẻ đang hỏi về lệnh/tính năng của bot -> nên nhúng
+    danh sách lệnh thật vào system prompt để AI trả lời đúng tên lệnh/cú pháp,
+    không bịa ra lệnh không tồn tại."""
+    return bool(_HELP_TRIGGER_RE.search(text or ""))
+
+
+def _build_help_context(text: str) -> str:
+    if not _command_list_text or not needs_help_context(text):
+        return ""
+    return (
+        "\n\nDưới đây là danh sách THẬT toàn bộ lệnh slash của bot - người dùng có vẻ "
+        "đang hỏi về lệnh/cách dùng bot, hãy trả lời DỰA ĐÚNG vào danh sách này (đúng "
+        "tên lệnh, đúng tham số trong ngoặc vuông), không bịa ra lệnh không có trong "
+        "danh sách. Có thể chỉ nhắc vài lệnh liên quan tới câu hỏi, không cần liệt kê "
+        "hết nếu không cần thiết:\n\n"
+        f"{_command_list_text}"
+    )
 
 # từ dừng - các từ tiếng Việt/Anh cực phổ biến trong chat hằng ngày, không
 # đáng "học" vì ai cũng biết nghĩa (mở rộng từ danh sách cũ ~15 từ vì trước
@@ -169,6 +303,101 @@ def needs_web_search(text: str) -> bool:
     return bool(_SEARCH_TRIGGER_RE.search(text or ""))
 
 
+# ---------------------------------------------------------------------------
+# AI hiểu lệnh tặng MICK: cho phép user nhờ AI (qua chat tự nhiên, tag/reply
+# bot) tặng MICK cho người khác, KHÔNG cần gõ đúng lệnh /transfer-money.
+# AI CHỈ nhận diện Ý ĐỊNH (có định tặng không, tặng ai, bao nhiêu) - mọi việc
+# xác thực (mention có thật không, đủ hạn ngạch/số dư không) và THỰC THI cộng
+# trừ MICK đều do code Python quyết định, không tin tưởng mù quáng số liệu
+# AI trả về, để tránh bị prompt-injection dụ AI "tặng" khống.
+#
+# Giới hạn: mỗi người TẶNG tối đa AI_GIFT_DAILY_LIMIT_MICK (mặc định 5) MICK
+# /ngày (giờ VN) qua đường AI - không tính vào/ảnh hưởng các nguồn MICK khác
+# (Daily, minigame, /transfer-money thường...). Đếm trong RAM, reset khi qua
+# ngày mới (giờ VN) - mất khi bot restart, chấp nhận được vì đây chỉ là 1
+# tính năng phụ vui, không phải sổ cái tài chính chính.
+# ---------------------------------------------------------------------------
+
+_GIFT_TRIGGER_RE = re.compile(
+    r"(tặng|cho|gửi|chuyển|biếu).{0,20}(mick|mic\b|xu|tiền)",
+    re.IGNORECASE,
+)
+
+_gift_sent_today: dict[int, int] = {}  # user_id (người TẶNG) -> tổng MICK đã tặng qua AI hôm nay
+_gift_sent_date: str | None = None  # "YYYY-MM-DD" giờ VN của lần cuối cùng đếm, để biết khi nào cần reset
+
+
+def _vn_today_str() -> str:
+    now_vn = time.gmtime(time.time() + VN_UTC_OFFSET_HOURS * 3600)
+    return time.strftime("%Y-%m-%d", now_vn)
+
+
+def _gift_remaining_today(user_id: int) -> int:
+    """Số MICK user này còn được tặng qua AI hôm nay (giờ VN)."""
+    global _gift_sent_today, _gift_sent_date
+    today = _vn_today_str()
+    if _gift_sent_date != today:
+        _gift_sent_today = {}
+        _gift_sent_date = today
+    return max(0, AI_GIFT_DAILY_LIMIT_MICK - _gift_sent_today.get(user_id, 0))
+
+
+def _record_gift_sent(user_id: int, amount: int) -> None:
+    global _gift_sent_today, _gift_sent_date
+    today = _vn_today_str()
+    if _gift_sent_date != today:
+        _gift_sent_today = {}
+        _gift_sent_date = today
+    _gift_sent_today[user_id] = _gift_sent_today.get(user_id, 0) + amount
+
+
+async def detect_gift_intent(text: str) -> dict | None:
+    """Nhờ Groq xem câu nói có phải đang NHỜ BOT TẶNG MICK cho ai đó không.
+
+    Trả về None nếu không phải ý định tặng MICK (đa số trường hợp - hàm này
+    chỉ được gọi khi khớp _GIFT_TRIGGER_RE để đỡ tốn call cho mọi tin nhắn).
+    Nếu có, trả {"amount": int, "target_hint": str} - target_hint là tên/biệt
+    danh AI đọc được trong câu, CHỈ dùng để đối chiếu với mention thật trong
+    tin nhắn Discord (message.mentions), không dùng để tự suy ra người dùng.
+    AI KHÔNG được tự quyết ai nhận hay số tiền vượt giới hạn - đó là việc của
+    code, xem _handle_ai_gift trong discord_bot.py."""
+    if not _GIFT_TRIGGER_RE.search(text or ""):
+        return None
+
+    prompt = (
+        "Câu sau đây có phải người dùng đang nhờ BOT TẶNG/CHO/CHUYỂN một số "
+        "MICK (đơn vị tiền ảo của server) cho một người khác không? Chỉ tính "
+        "là có nếu người dùng RÕ RÀNG muốn tặng, không tính câu hỏi chung "
+        "chung, than vãn hết tiền, hay nhắc tới MICK vì lý do khác.\n\n"
+        f"Câu: \"{text}\"\n\n"
+        "Trả lời CHỈ bằng JSON, không thêm chữ nào khác, đúng 1 trong 2 dạng:\n"
+        '{"is_gift": false}\n'
+        'hoặc\n'
+        '{"is_gift": true, "amount": <số nguyên MICK>, "target_hint": "<tên/biệt danh được nhắc tới, hoặc rỗng>"}'
+    )
+    result = await _groq_chat([
+        {"role": "system", "content": "Bạn là công cụ trả JSON thuần, không giải thích thêm."},
+        {"role": "user", "content": prompt},
+    ], max_tokens=100)
+    if not result:
+        return None
+    try:
+        cleaned = result.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`")
+            cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned
+        parsed = json.loads(cleaned)
+        if not isinstance(parsed, dict) or not parsed.get("is_gift"):
+            return None
+        amount = int(parsed.get("amount", 0))
+        if amount <= 0:
+            return None
+        return {"amount": amount, "target_hint": str(parsed.get("target_hint", "")).strip()}
+    except (json.JSONDecodeError, ValueError, TypeError, IndexError) as e:
+        log.warning("Parse JSON ý định tặng MICK lỗi: %s | raw: %s", e, result[:200])
+        return None
+
+
 async def _tavily_search_answer(system_prompt: str, user_text: str) -> tuple[str | None, bool, str]:
     """Lấy kết quả tìm kiếm từ Tavily rồi nhờ Groq tóm tắt lại thành câu trả
     lời tự nhiên. Trả về (nội dung, ok, lý_do) - lý_do là mã lỗi ngắn gọn để
@@ -220,20 +449,206 @@ async def _tavily_search_answer(system_prompt: str, user_text: str) -> tuple[str
     return result, True, ""
 
 
+# ---------------------------------------------------------------------------
+# Trí nhớ hội thoại ngắn hạn: lưu vài lượt hỏi-đáp gần nhất theo user (RAM,
+# KHÔNG lưu Firestore) để AI trả lời có ngữ cảnh nối tiếp thay vì mỗi tin
+# nhắn là 1 cuộc hội thoại độc lập. Reset tự nhiên khi bot restart (không cần
+# lệnh xoá riêng) - đây chỉ là trí nhớ "phiên chat", không phải hồ sơ lâu dài.
+# ---------------------------------------------------------------------------
+
+_MEMORY_MAX_TURNS = 8  # tối đa 8 cặp hỏi-đáp/user - đủ để giữ mạch 1 chủ đề dài mà không phình prompt quá mức
+_MEMORY_TTL_SEC = 45 * 60  # quên hội thoại nếu im lặng quá 45 phút
+_conversation_memory: dict[int, list[dict]] = {}
+_conversation_last_active: dict[int, float] = {}
+
+
+def _get_history(user_id: int) -> list[dict]:
+    last_active = _conversation_last_active.get(user_id, 0)
+    if time.time() - last_active > _MEMORY_TTL_SEC:
+        _conversation_memory.pop(user_id, None)
+        return []
+    return _conversation_memory.get(user_id, [])
+
+
+def _remember_turn(user_id: int, user_text: str, bot_text: str) -> None:
+    history = _conversation_memory.setdefault(user_id, [])
+    history.append({"role": "user", "content": user_text})
+    history.append({"role": "assistant", "content": bot_text})
+    # Giữ tối đa _MEMORY_MAX_TURNS cặp (2 message/cặp)
+    max_messages = _MEMORY_MAX_TURNS * 2
+    if len(history) > max_messages:
+        del history[: len(history) - max_messages]
+    _conversation_last_active[user_id] = time.time()
+
+
+def clear_history(user_id: int) -> None:
+    """Xoá trí nhớ hội thoại của 1 user - dùng cho lệnh /quen-di nếu muốn bắt
+    đầu lại cuộc trò chuyện với AI từ đầu."""
+    _conversation_memory.pop(user_id, None)
+    _conversation_last_active.pop(user_id, None)
+
+
 async def reply_to_message(message: discord.Message) -> str | None:
     """Trả lời 1 tin nhắn của user (do reply hoặc tag bot). Nếu câu hỏi có vẻ
     cần thông tin thời sự (xem needs_web_search) thì tự xử lý gửi + sửa tin
-    nhắn luôn (trả về None để _handle_ai_reply không gửi thêm lần nữa)."""
+    nhắn luôn (trả về None để _handle_ai_reply không gửi thêm lần nữa).
+
+    Có nhớ vài lượt hỏi-đáp gần nhất của CHÍNH user này (xem _get_history) để
+    trả lời nối được ngữ cảnh câu trước, thay vì luôn coi là câu hỏi mới."""
     context = await _build_slang_context()
-    system_prompt = SYSTEM_PROMPT + context
+    system_prompt = SYSTEM_PROMPT + context + _build_rules_context(message.content) + _build_help_context(message.content)
+    user_id = message.author.id
+
+    url = _extract_first_url(message.content)
+    if url:
+        await _reply_with_url_summary(message, system_prompt, message.content, url)
+        return None
 
     if needs_web_search(message.content):
         await _reply_with_search(message, system_prompt, message.content)
         return None
 
-    messages = [{"role": "system", "content": system_prompt}, {"role": "user", "content": message.content}]
+    history = _get_history(user_id)
+    messages = [{"role": "system", "content": system_prompt}, *history, {"role": "user", "content": message.content}]
     result = await _groq_chat(messages)
-    return _sanitize_ai_output(result) if result else result
+    if not result:
+        return result
+    final_text = _sanitize_ai_output(result)
+    _remember_turn(user_id, message.content, final_text)
+    return final_text
+
+
+# ---------------------------------------------------------------------------
+# Phân tích link web: khi người dùng dán URL vào chat, bot tự fetch trang đó,
+# lọc bớt HTML (dùng html.parser có sẵn trong Python, KHÔNG cần cài thêm
+# bs4/lxml để tránh phải sửa requirements.txt trên server thật), rồi nhờ Groq
+# tóm tắt/trả lời dựa trên nội dung thật của trang - không đoán mò nội dung.
+# ---------------------------------------------------------------------------
+
+_URL_RE = re.compile(r"https?://[^\s<>\"']+")
+_URL_FETCH_MAX_CHARS = 6000  # cắt bớt HTML thô trước khi strip tag, tránh trang quá dài tốn CPU/token
+_URL_TEXT_MAX_CHARS = 4000  # cắt bớt text đã lọc trước khi đưa vào prompt Groq
+
+
+def _extract_first_url(text: str) -> str | None:
+    match = _URL_RE.search(text or "")
+    return match.group(0) if match else None
+
+
+class _HTMLTextExtractor(HTMLParser):
+    """Lọc HTML lấy text thô bằng thư viện chuẩn (không cần bs4) - bỏ qua nội
+    dung trong <script>/<style>, gộp khoảng trắng thừa."""
+
+    def __init__(self):
+        super().__init__()
+        self._skip_depth = 0
+        self._chunks: list[str] = []
+        self.title = ""
+        self._in_title = False
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style", "noscript"):
+            self._skip_depth += 1
+        elif tag == "title":
+            self._in_title = True
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style", "noscript") and self._skip_depth > 0:
+            self._skip_depth -= 1
+        elif tag == "title":
+            self._in_title = False
+
+    def handle_data(self, data):
+        if self._in_title:
+            self.title += data
+        elif self._skip_depth == 0 and data.strip():
+            self._chunks.append(data.strip())
+
+    def get_text(self) -> str:
+        return re.sub(r"\s+", " ", " ".join(self._chunks)).strip()
+
+
+async def _fetch_url_text(url: str) -> tuple[str | None, str | None, str]:
+    """Tải 1 URL, trả về (title, text_thô_đã_lọc, lý_do_lỗi_nếu_có).
+    Chỉ chấp nhận content-type text/html - không tải file nhị phân (pdf,
+    ảnh, video...) vì html.parser không đọc được các định dạng đó."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            headers = {"User-Agent": "Mozilla/5.0 (compatible; MickBot/1.0; +discord)"}
+            async with session.get(url, headers=headers, timeout=15, allow_redirects=True) as resp:
+                if resp.status != 200:
+                    return None, None, f"http_{resp.status}"
+                content_type = resp.headers.get("Content-Type", "")
+                if "text/html" not in content_type and "application/xhtml" not in content_type:
+                    return None, None, f"không phải trang HTML (content-type: {content_type[:50]})"
+                raw = await resp.text(errors="ignore")
+    except Exception as e:
+        log.warning("Fetch URL '%s' lỗi: %s", url, e)
+        return None, None, f"lỗi mạng/timeout: {e}"
+
+    raw = raw[:_URL_FETCH_MAX_CHARS * 3]  # cắt HTML thô sớm (tag chiếm nhiều ký tự hơn text thật)
+    parser = _HTMLTextExtractor()
+    try:
+        parser.feed(raw)
+    except Exception as e:
+        return None, None, f"lỗi parse HTML: {e}"
+
+    text = parser.get_text()[:_URL_TEXT_MAX_CHARS]
+    if not text:
+        return parser.title.strip(), None, "trang không có nội dung văn bản đọc được"
+    return parser.title.strip(), text, ""
+
+
+async def _reply_with_url_summary(message: discord.Message, system_prompt: str, user_text: str, url: str) -> None:
+    status_msg = None
+    try:
+        status_msg = await message.reply(
+            "-# 🔗 đang đọc trang web...", mention_author=False, allowed_mentions=discord.AllowedMentions.none()
+        )
+    except Exception as e:
+        log.warning("Gửi thông báo đang đọc web lỗi: %s", e)
+
+    title, text, reason = await _fetch_url_text(url)
+    if not text:
+        final_text = (
+            "-# ⚠️ không đọc được trang này\n"
+            f"Sorry, mình không đọc được nội dung trang bạn gửi 🙏\n"
+            f"-# lý do: {reason}"
+        )
+    else:
+        # Bỏ URL khỏi câu hỏi gửi cho Groq để không lặp lại, giữ phần hỏi
+        # thêm của user (nếu có) làm ngữ cảnh - vd "trang này nói gì vậy".
+        question = (user_text.replace(url, "").strip()) or "Tóm tắt nội dung chính của trang này."
+        groq_prompt = (
+            f"{system_prompt}\n\n"
+            "Người dùng vừa gửi 1 link web, dưới đây là nội dung THẬT đã trích xuất từ "
+            "trang đó (tiêu đề + văn bản, có thể bị cắt bớt nếu trang dài). Dựa ĐÚNG vào "
+            "nội dung này để trả lời/tóm tắt, không bịa thêm thông tin không có trong "
+            "trang, không nói 'theo nội dung trích xuất' - trả lời tự nhiên như đã tự đọc "
+            "trang đó:\n\n"
+            f"Tiêu đề: {title or '(không có)'}\n\nNội dung:\n{text}"
+        )
+        result = await _groq_chat(
+            [{"role": "system", "content": groq_prompt}, {"role": "user", "content": question}],
+            max_tokens=600,
+        )
+        if result:
+            final_text = _sanitize_ai_output(result)
+            if len(final_text) > 2000:
+                final_text = final_text[:1990] + "…"
+        else:
+            final_text = "😵 Đọc được trang rồi nhưng AI tóm tắt lỗi (thiếu GROQ_API_KEY hoặc lỗi kết nối)."
+
+    if status_msg is not None:
+        try:
+            await status_msg.edit(content=final_text)
+            return
+        except Exception as e:
+            log.warning("Sửa tin nhắn tóm tắt web lỗi: %s", e)
+    try:
+        await message.reply(final_text, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+    except Exception:
+        pass
 
 
 async def _reply_with_search(message: discord.Message, system_prompt: str, user_text: str) -> None:
@@ -390,23 +805,59 @@ async def summarize_bot_update(
 # ---------------------------------------------------------------------------
 
 
-# Bộ đệm RAM cho việc "học từ": TRƯỚC ĐÂY mỗi từ lạ trong mỗi tin nhắn tốn 1
-# lượt ĐỌC + 1 lượt GHI Firestore riêng (get_word rồi save_word) -> server chat
-# đông là hết quota free tier ngay (429 RESOURCE_EXHAUSTED, xem log lỗi). Giờ
-# chỉ cộng dồn vào dict RAM ở đây, KHÔNG đụng Firestore; một tasks.loop định kỳ
-# (xem flush_learned_words, gọi từ discord_bot.py) mới đẩy cả đợt lên bằng 1
-# batch ghi duy nhất (Firestore Increment - không cần đọc trước).
+# Bộ đệm RAM cho việc "học từ":
+# - Từ ĐÃ BIẾT nghĩa (đã có trong Firebase, nạp vào _known_words_cache khi bot
+#   khởi động/lần đầu cần) -> gặp lại chỉ cộng dồn "count" vào RAM ở đây,
+#   flush theo batch định kỳ (xem flush_learned_words) để đỡ tốn quota ghi.
+# - Từ CHƯA BIẾT (lần đầu gặp) -> hỏi AI đoán nghĩa NGAY (gộp mọi từ mới
+#   trong CÙNG 1 tin nhắn thành 1 lượt gọi Groq duy nhất), rồi lưu thẳng vào
+#   Firebase với count=1 - không cần đợi tasks.loop định kỳ như trước.
 _pending_word_counts: dict[str, int] = {}
 _pending_word_last_seen: dict[str, int] = {}
 _PENDING_WORD_CAP = 500  # chặn RAM phình nếu chat cực đông mà chưa kịp flush
 
+# Cache RAM các từ ĐÃ CÓ NGHĨA (đã học được, dù dạy tay hay AI đoán) - dùng để
+# biết ngay 1 từ có "mới" hay không mà không phải đọc Firebase mỗi tin nhắn.
+# Nạp/làm mới từ db.get_learned_words() (đã có cache 120s riêng ở tầng db).
+_known_words_cache: set[str] | None = None
+_known_words_cache_ts: float = 0.0
+_KNOWN_WORDS_CACHE_TTL = 120  # giây, khớp với cache của db.get_learned_words
+
+
+async def _get_known_words() -> set[str]:
+    global _known_words_cache, _known_words_cache_ts
+    now = time.time()
+    if _known_words_cache is not None and (now - _known_words_cache_ts) < _KNOWN_WORDS_CACHE_TTL:
+        return _known_words_cache
+    words = await db.get_learned_words()
+    _known_words_cache = {w for w, d in words if d.get("meaning")}
+    _known_words_cache_ts = now
+    return _known_words_cache
+
+
+def _remember_known_word(word: str) -> None:
+    """Thêm 1 từ vừa học được vào cache RAM ngay lập tức (không đợi hết TTL),
+    tránh việc hỏi AI đoán lại từ y hệt ở tin nhắn kế tiếp trong lúc cache
+    tầng db.get_learned_words() chưa kịp làm mới."""
+    global _known_words_cache
+    if _known_words_cache is None:
+        _known_words_cache = set()
+    _known_words_cache.add(word)
+
+
+# Giới hạn số từ MỚI (chưa biết) được đoán nghĩa mỗi tin nhắn - 1 tin nhắn dù
+# có bao nhiêu từ lạ cũng chỉ tốn TỐI ĐA 1 lượt gọi Groq (xem
+# guess_meanings_for_batch: gộp cả batch vào 1 call), tránh spam link/copy-paste
+# dài ngoằng làm tốn quota bất thường.
+_NEW_WORDS_PER_MESSAGE_CAP = 8
+
 
 async def learn_from_message(content: str, member_count: int = 0) -> None:
-    """Ghi nhận tần suất từ lạ xuất hiện trong chat (chỉ cộng dồn vào RAM, xem
-    flush_learned_words() để biết khi nào thật sự ghi lên Firebase). KHÔNG tự
-    gọi AI tra nghĩa (đã bỏ để giảm số lần gọi Groq mỗi tin nhắn -> giảm CPU/độ
-    trễ nền); nghĩa của từ chỉ được lưu khi member chủ động dạy qua `/từ-điển`
-    (xem teach_word).
+    """Ghi nhận từ lạ xuất hiện trong chat:
+    - Từ đã biết nghĩa -> cộng dồn count vào RAM (flush định kỳ, xem
+      flush_learned_words), KHÔNG gọi AI lại.
+    - Từ chưa biết -> hỏi AI đoán nghĩa NGAY (1 lượt Groq cho cả batch từ mới
+      trong tin nhắn này), lưu luôn vào Firebase kèm count=1 nếu đoán được.
 
     Chỉ "học" khi server có TỐI THIỂU AI_LEARN_MIN_MEMBERS thành viên (mặc
     định 15) - server nhỏ/test thì bỏ qua, tránh học/ghi DB vô ích."""
@@ -418,19 +869,40 @@ async def learn_from_message(content: str, member_count: int = 0) -> None:
     words = {w for w in words if not _looks_like_spam_repeat(w)}
     if not words:
         return
-    if len(_pending_word_counts) >= _PENDING_WORD_CAP:
-        return  # đang chờ flush quá nhiều từ rồi, bỏ qua tin nhắn này để tránh phình RAM
+
+    known = await _get_known_words()
+    new_words = list(words - known)[:_NEW_WORDS_PER_MESSAGE_CAP]
+    seen_words = words & known
 
     now = int(time.time())
-    for word in words:
-        _pending_word_counts[word] = _pending_word_counts.get(word, 0) + 1
-        _pending_word_last_seen[word] = now
+
+    # Từ đã biết -> chỉ đếm thêm (RAM, flush theo batch như cũ)
+    if seen_words and len(_pending_word_counts) < _PENDING_WORD_CAP:
+        for word in seen_words:
+            _pending_word_counts[word] = _pending_word_counts.get(word, 0) + 1
+            _pending_word_last_seen[word] = now
+
+    # Từ mới -> đoán nghĩa ngay, lưu thẳng Firebase (không đợi tasks.loop)
+    if new_words:
+        try:
+            guessed = await guess_meanings_for_batch(new_words)
+        except Exception as e:
+            log.warning("Đoán nghĩa từ mới ngay lúc chat lỗi: %s", e)
+            return
+        for word, meaning in guessed.items():
+            try:
+                await db.save_word(word, {"meaning": meaning, "source": "ai_guessed", "count": 1, "last_seen": now})
+                _remember_known_word(word)
+            except Exception as e:
+                log.warning("Lưu từ mới học được '%s' lỗi: %s", word, e)
 
 
 async def flush_learned_words() -> None:
-    """Đẩy toàn bộ số đếm từ đang chờ trong RAM lên Firestore theo batch. Gọi
-    định kỳ (vd. mỗi vài phút) từ 1 tasks.loop trong discord_bot.py - KHÔNG
-    gọi trực tiếp mỗi tin nhắn."""
+    """Đẩy toàn bộ số đếm từ ĐÃ BIẾT đang chờ trong RAM lên Firestore theo
+    batch (tăng "count" của từ đã có nghĩa mỗi khi gặp lại). Gọi định kỳ (vd.
+    mỗi vài phút) từ 1 tasks.loop trong discord_bot.py - KHÔNG gọi trực tiếp
+    mỗi tin nhắn. Từ MỚI (chưa biết) đã được lưu ngay lúc gặp trong
+    learn_from_message(), không đi qua hàm này."""
     if not _pending_word_counts:
         return
     counts = dict(_pending_word_counts)
@@ -459,7 +931,10 @@ async def teach_word(word: str, meaning: str) -> dict:
     if len(word) > 50 or len(meaning) > 300:
         return {"ok": False, "reason": "too_long"}
 
-    await db.save_word(word, {"meaning": meaning, "source": "taught", "last_seen": int(time.time())})
+    existing = await db.get_word(word)
+    count = existing.get("count", 0) if existing else 0
+    await db.save_word(word, {"meaning": meaning, "source": "taught", "count": count, "last_seen": int(time.time())})
+    _remember_known_word(word)
     return {"ok": True}
 
 
@@ -510,29 +985,6 @@ async def guess_meanings_for_batch(words: list[str]) -> dict[str, str]:
     except (json.JSONDecodeError, ValueError, IndexError) as e:
         log.warning("Parse JSON đoán nghĩa từ AI lỗi: %s | raw: %s", e, result[:200])
         return {}
-
-
-async def guess_meanings_for_top_words(batch_size: int = 20, min_count: int = 3) -> int:
-    """Lấy top từ đã học được ĐẾM NHIỀU LẦN nhưng CHƯA CÓ NGHĨA, nhờ AI đoán
-    nghĩa hàng loạt (1 call cho cả batch), rồi lưu lại với source="ai_guessed"
-    để _build_slang_context() dùng được trong chat. Trả về số từ đoán thành công.
-
-    Chỉ đoán từ có count >= min_count (từ chỉ lỡ gõ 1 lần không đáng đoán) và
-    giới hạn batch_size từ/lần để prompt không quá dài."""
-    words = await db.get_learned_words(use_cache=False)
-    candidates = [
-        (w, d.get("count", 0)) for w, d in words
-        if not d.get("meaning") and d.get("count", 0) >= min_count
-    ]
-    if not candidates:
-        return 0
-    candidates.sort(key=lambda x: x[1], reverse=True)
-    top_words = [w for w, _ in candidates[:batch_size]]
-
-    guessed = await guess_meanings_for_batch(top_words)
-    for word, meaning in guessed.items():
-        await db.save_word(word, {"meaning": meaning, "source": "ai_guessed"})
-    return len(guessed)
 
 
 async def _build_slang_context(limit: int = 12) -> str:

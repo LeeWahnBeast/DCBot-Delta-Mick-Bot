@@ -20,7 +20,8 @@ import time
 import db
 import economy
 import features
-from config import BUSINESS_INCOME_PER_TICK, BUSINESS_TICK_SEC, BUSINESS_NAMES, log
+from features import BUSINESS_NAMES
+from config import BUSINESS_INCOME_PER_TICK, BUSINESS_TICK_SEC, log
 
 UPGRADE_MAX_LEVEL = 5
 UPGRADE_INCOME_BONUS_PER_LEVEL = 0.15  # +15% thu nhập mỗi level nâng cấp

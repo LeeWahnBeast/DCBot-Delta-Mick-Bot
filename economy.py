@@ -106,7 +106,7 @@ async def add_xp(user_id: int, amount: int) -> dict:
     return {"level": level, "levels_gained": levels_gained, "mick_awarded": mick_awarded, "xp": xp, "mick": mick}
 
 
-async def add_mick(user_id: int, amount: int) -> int | float:
+async def add_mick(user_id: int, amount: int, count_for_season: bool = True) -> int | float:
     """Cộng (hoặc trừ, nếu amount âm) MICK cho user. Trả về số dư mới.
     Có lock theo user_id để 2 request cùng lúc không đọc/ghi đè lên nhau.
 
@@ -116,7 +116,18 @@ async def add_mick(user_id: int, amount: int) -> int | float:
     DeltaX (/mick-shop): nếu user đang sở hữu item còn hạn và amount > 0
     (chỉ nhân MICK KIẾM ĐƯỢC, không nhân khi bị trừ tiền vd cược thua/chuyển
     khoản), nhân thêm hệ số ngẫu nhiên đã chốt lúc mua (multiplier lưu sẵn
-    trong shop_purchases, không random lại mỗi lần cộng)."""
+    trong shop_purchases, không random lại mỗi lần cộng).
+
+    Đây cũng là điểm chốt DUY NHẤT cho "kiếm MICK thật" (thắng game, quest,
+    business, level up, PvP...) - transfer_mick() và place_bet() KHÔNG đi qua
+    hàm này (chúng chỉnh số dư trực tiếp), nên cộng season score ở đây là đủ
+    bao quát mọi nguồn thu nhập chính mà không tính nhầm tiền chuyển khoản/
+    cược vào điểm mùa (xem season.add_season_score).
+
+    count_for_season=False: dùng khi amount > 0 chỉ là HOÀN LẠI tiền cược đã
+    trừ trước đó (hoà PvP, dừng ván giữa chừng...) - không phải thu nhập mới,
+    nên không được tính điểm mùa (nếu không, người chơi có thể farm điểm mùa
+    bằng cách đặt cược rồi tự huỷ/hoà liên tục)."""
     if is_owner(user_id):
         return INFINITE
     if amount > 0:
@@ -125,6 +136,12 @@ async def add_mick(user_id: int, amount: int) -> int | float:
         user = await db.get_user(user_id)
         new_balance = max(0, user["mick"] + amount)
         await db.save_user(user_id, {"mick": new_balance})
+        if amount > 0 and count_for_season:
+            try:
+                import season
+                await season.add_season_score(user_id, amount)
+            except Exception:
+                pass  # season score chỉ là bảng xếp hạng phụ, lỗi ở đây không được làm hỏng việc cộng MICK
         return new_balance
 
 
